@@ -1,6 +1,6 @@
 {
   "name": "sgs-oa-mcp-server",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "MCP Server for 山钢资本数智办公平台 - 支持所有 AI Agent 一键接入",
   "main": "dist/index.js",
   "bin": {

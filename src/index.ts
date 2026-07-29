@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -96,17 +95,28 @@ if (transport === 'stdio') {
   const app = express();
   app.use(express.json());
 
-  const API_KEYS = new Set(['dev-key-001', 'prod-key-002']);
-  app.use((req, res, next) => {
+  // ============ 认证 ============
+  // 从环境变量读取有效的 API Key（逗号分隔）
+  const validApiKeys = (process.env.MCP_API_KEYS || 'dev-key-001')
+    .split(',')
+    .map(k => k.trim())
+    .filter(k => k.length > 0);
+
+  function authMiddleware(req: express.Request, res: express.Response, next: express.NextFunction) {
     const apiKey = req.headers['x-api-key'] as string || req.headers['authorization']?.replace('Bearer ', '');
-    if (!apiKey || !API_KEYS.has(apiKey)) {
-      return res.status(401).json({ error: 'Unauthorized' });
+    if (!apiKey || !validApiKeys.includes(apiKey)) {
+      return res.status(401).json({ error: 'Unauthorized', message: 'Invalid API Key' });
     }
     next();
+  }
+
+  // ============ 健康检查（无需认证） ============
+  app.get('/health', (req, res) => {
+    res.json({ status: 'ok', timestamp: new Date().toISOString() });
   });
 
-  // MCP 端点
-  app.post('/mcp', async (req, res) => {
+  // ============ MCP 端点 ============
+  app.post('/mcp', authMiddleware, async (req, res) => {
     const httpTransport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true
@@ -116,8 +126,10 @@ if (transport === 'stdio') {
     await httpTransport.handleRequest(req, res, req.body);
   });
 
-  // REST API（给非 MCP Agent）
-  app.post('/api/v1/tools/search_office', async (req, res) => {
+  // ============ REST API ============
+
+  // 查询办公场所
+  app.post('/api/v1/tools/search_office', authMiddleware, async (req, res) => {
     try {
       const params: OfficeSearchParams = {
         officenm: req.body.officenm,
@@ -132,7 +144,8 @@ if (transport === 'stdio') {
     }
   });
 
-  app.post('/api/v1/tools/get_office_detail', async (req, res) => {
+  // 获取场所详情
+  app.post('/api/v1/tools/get_office_detail', authMiddleware, async (req, res) => {
     try {
       const result = await getOfficeDetail(req.body.officeid);
       res.json({ success: true, data: result });
@@ -141,7 +154,8 @@ if (transport === 'stdio') {
     }
   });
 
-  app.post('/api/v1/tools/search_room', async (req, res) => {
+  // 查询会议室
+  app.post('/api/v1/tools/search_room', authMiddleware, async (req, res) => {
     try {
       const params: RoomSearchParams = {
         roomnm: req.body.roomnm,
@@ -157,7 +171,8 @@ if (transport === 'stdio') {
     }
   });
 
-  app.post('/api/v1/tools/get_room_detail', async (req, res) => {
+  // 获取会议室详情
+  app.post('/api/v1/tools/get_room_detail', authMiddleware, async (req, res) => {
     try {
       const result = await getRoomDetail(req.body.roomid);
       res.json({ success: true, data: result });
@@ -166,7 +181,8 @@ if (transport === 'stdio') {
     }
   });
 
-  app.get('/api/v1/tools', (req, res) => {
+  // Tool 列表
+  app.get('/api/v1/tools', authMiddleware, (req, res) => {
     res.json({
       success: true,
       tools: [
@@ -176,10 +192,6 @@ if (transport === 'stdio') {
         { name: 'get_room_detail', description: '获取会议室详情', params: { roomid: 'string (必填)' } }
       ]
     });
-  });
-
-  app.get('/health', (req, res) => {
-    res.json({ status: 'ok', timestamp: new Date().toISOString() });
   });
 
   const PORT = process.env.PORT || 3000;
