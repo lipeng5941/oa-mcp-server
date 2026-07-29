@@ -1,0 +1,45 @@
+{
+  "name": "sgs-oa-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP Server for 山钢资本数智办公平台 - 支持所有 AI Agent 一键接入",
+  "main": "dist/index.js",
+  "bin": {
+    "sgs-oa-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "oa",
+    "数智办公",
+    "山钢资本",
+    "claude",
+    "cursor",
+    "ai-agent"
+  ],
+  "author": "山钢资本金融科技服务中心",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "axios": "^1.7.0",
+    "dotenv": "^16.4.0",
+    "express": "^4.21.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.5.0"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
