@@ -1,7 +1,7 @@
 {
   "name": "sgs-oa-mcp-server",
-  "version": "1.1.1",
-  "description": "MCP Server for 山钢资本数智办公平台 - 支持所有 AI Agent 一键接入",
+  "version": "2.0.0",
+  "description": "MCP Server for 山钢资本数智办公平台 - 统一认证（MaxKey OAuth2/OIDC）版",
   "main": "dist/index.js",
   "bin": {
     "sgs-oa-mcp": "dist/index.js"
@@ -9,14 +9,17 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "ts-node src/index.ts",
-    "prepublishOnly": "npm run build"
+    "test": "node --test test/",
+    "prepublishOnly": "npm run build && npm test"
   },
   "keywords": [
     "mcp",
     "oa",
     "数智办公",
     "山钢资本",
+    "oauth2",
+    "oidc",
+    "maxkey",
     "claude",
     "cursor",
     "ai-agent"
@@ -25,7 +28,6 @@
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "axios": "^1.7.0",
     "dotenv": "^16.4.0",
     "express": "^4.21.0",
     "zod": "^3.23.0"
@@ -37,7 +39,8 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    ".env.example"
   ],
   "engines": {
     "node": ">=18.0.0"

@@ -1,9 +1,22 @@
 node_modules/
 dist/
 .env
+.env.*
+!.env.example
+logs/
 *.log
 npm-debug.log*
 .DS_Store
 .vscode/
 .idea/
 *.tsbuildinfo
+
+# 登录态/凭据痕迹文件：严禁入库（历史教训：曾误入本地 HEAD）
+maxkey_state.json
+captcha_latest.png
+login_page.png
+session.json
+*.state.json
+oa_login*.py
+index.js
+test/e2e-result.json
