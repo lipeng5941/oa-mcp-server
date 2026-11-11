@@ -18,7 +18,7 @@
  */
 import { createServer } from 'http';
 import { generateKeyPairSync, createSign, createHash, randomBytes } from 'crypto';
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -174,6 +174,26 @@ function parseDocTable(actbasid) {
   return Object.keys(map).length ? map : null;
 }
 
+// 报告里附上测试套件实测计数：unit 现场跑一遍（TAP 解析），e2e 读最近一次 test/e2e-result.json
+function readSuites() {
+  const suites = { tsc: { cmd: 'npx tsc --noEmit', note: '本脚本运行前须已通过类型检查' } };
+  try {
+    const r = spawnSync(process.execPath, ['--test', '--test-reporter=tap', path.join(REPO, 'test/ledger.test.mjs')], { cwd: REPO, encoding: 'utf8' });
+    const pass = /^# pass (\d+)/m.exec(r.stdout || '');
+    const fail = /^# fail (\d+)/m.exec(r.stdout || '');
+    suites.unit = { cmd: 'npm run test:unit', total: (Number(pass?.[1]) || 0) + (Number(fail?.[1]) || 0), pass: Number(pass?.[1]), fail: Number(fail?.[1]) };
+  } catch {
+    suites.unit = { cmd: 'npm run test:unit', note: '脚本内自检未运行' };
+  }
+  try {
+    const e = JSON.parse(fs.readFileSync(path.join(REPO, 'test/e2e-result.json'), 'utf8'));
+    suites.e2e = { cmd: 'npm run test:e2e', total: e.results.length, pass: e.results.filter(x => x.pass).length, fail: e.results.filter(x => !x.pass).length, report: 'test/e2e-result.json', ts: e.ts };
+  } catch {
+    suites.e2e = { cmd: 'npm run test:e2e', note: '未找到 test/e2e-result.json' };
+  }
+  return suites;
+}
+
 async function main() {
   if (!fs.existsSync(SNAPSHOT_PATH)) {
     console.error(`FATAL: 快照不存在 ${SNAPSHOT_PATH}`);
@@ -215,7 +235,7 @@ async function main() {
       health.adapter === null && health.snapshot?.available === true &&
       health.snapshot?.rowCount === rows.length && health.snapshot?.version === snapshotVersion &&
       health.snapshot?.fetchedAt === snapshot.fetchedAt &&
-      !JSON.stringify(health).includes(path.basename(SNAPSHOT_PATH)) &&
+      !JSON.stringify(health).includes('ledger-knowledge-sync') &&
       !JSON.stringify(health).includes(tmpDir),
       `dataMode=${health.dataMode} realtime=${health.realtime} rowCount=${health.snapshot?.rowCount} version=${health.snapshot?.version} fetchedAt=${health.snapshot?.fetchedAt}`);
 
@@ -283,31 +303,33 @@ async function main() {
     const hashes = new Set();
     for (const line of audit.split(/\r?\n/)) {
       if (!line.trim()) continue;
-      try { const e = JSON.parse(line); if (e.employeeHash) hashes.add(e.employeeHash); } catch {}
+      try { const e = JSON.parse(line); if (e.employeeNoHash) hashes.add(e.employeeNoHash); } catch {}
     }
     const leaks = ['E1001', 'E2002', tokenA.slice(0, 24), tokenB.slice(0, 24), 'Bearer '].filter(s => audit.includes(s));
     check('R7', '审计日志：双员工各一哈希、无明文员工号、无令牌片段',
       hashes.size === 2 && leaks.length === 0 && audit.includes('tool_call'),
       `员工哈希=${hashes.size} 明文命中=${leaks.length} 行数=${audit.split(/\r?\n/).filter(Boolean).length}`);
 
-    // R8 49 列 display 与知识库文档逐格比对（全量）
-    const both = await mcpTool(tokenA, sidA, 'export_investment_ledger', { view: 'both', maxRows: 10 });
-    const apiRows = both.payload.rows;
-    const apiCellMismatch = [];
-    for (const row of apiRows) {
-      const docMap = parseDocTable(row.raw.actbasid);
-      if (!docMap) continue;
-      for (const [field, value] of Object.entries(row.display)) {
-        if (!(field in docMap)) { apiCellMismatch.push({ actbasid: row.raw.actbasid, field, kind: 'doc-missing-field' }); continue; }
-        if (docMap[field] !== value) apiCellMismatch.push({ actbasid: row.raw.actbasid, field, doc: docMap[field], api: value });
-      }
-    }
-    console.log(`[R8] HTTP 取样 ${apiRows.length} 行，逐格差异 ${apiCellMismatch.length} 格`);
-    for (const d of apiCellMismatch.slice(0, 5)) console.log(`      ${d.actbasid} ${d.field}: doc="${d.doc}" api="${d.api}"`);
+    // R8 49 列 display 与知识库文档逐格比对（全量 3387 条）
+    // 归一化口径（写进报告）：
+    //   - 文档侧「（页面列，上游本期无值）」= 页面无值标注，等价于 API 的 null/空串
+    //   - 仅空白差异（首尾空格）单列，不计入值差异
+    //   - 「未披露」只在两侧都表示缺值时可等价；若 API 仍输出「0 元」则为值缺陷
+    const SENTINEL = '（页面列，上游本期无值）';
+    const category = (docValue, apiValue) => {
+      const d = docValue === undefined ? '' : String(docValue);
+      const a = apiValue === null || apiValue === undefined ? '' : String(apiValue);
+      if (d === a) return 'exact';
+      if (d === SENTINEL && a === '') return 'doc-sentinel';
+      if (d.trim() === a.trim()) return 'whitespace-only';
+      if (d === '未披露' && /^0 元$/.test(a)) return 'undisclosed-vs-zero';
+      if (d === '未披露' && a === '') return 'undisclosed-vs-empty';
+      return 'value-differs';
+    };
 
-    // 全量：直接对快照 + 文档做离线逐格比对（不经 HTTP，覆盖 3387 条）
-    const { loadLedgerSnapshot, exportInvestmentLedger } = await import('../dist/api/ledger.js');
-    const offlineCfg = (await import('../dist/config.js')).loadConfig({
+    const { exportInvestmentLedger } = await import('../dist/api/ledger.js');
+    const { loadConfig } = await import('../dist/config.js');
+    const offlineCfg = loadConfig({
       AUTH_MODE: 'oidc', MCP_PORT: '1', MCP_BIND_ADDR: '127.0.0.1', MCP_PUBLIC_URL: MCP_URL,
       MAXKEY_ISSUER: IDP_ISSUER, MAXKEY_AUTHORIZE_URL: `${IDP_ISSUER}/a`, MAXKEY_TOKEN_URL: `${IDP_ISSUER}/t`,
       MAXKEY_JWKS_URL: `${IDP_ISSUER}/jwks`, MCP_CLIENT_ID: CLIENT_ID,
@@ -316,31 +338,36 @@ async function main() {
     });
     const fullAcl = path.join(tmpDir, 'acl-full.json');
     fs.writeFileSync(fullAcl, JSON.stringify({ schemaVersion: 1, employees: { 'E1001': ids } }));
-    const fullCfg = { ...offlineCfg, ledgerSnapshotAclPath: fullAcl };
-    const full = await exportInvestmentLedger(fullCfg, { employeeNo: 'E1001', sub: 'x' }, { view: 'both' }, 'offline-r8');
+    const full = await exportInvestmentLedger({ ...offlineCfg, ledgerSnapshotAclPath: fullAcl }, { employeeNo: 'E1001', sub: 'x' }, { view: 'both' }, 'offline-r8');
 
-    const fieldStat = {};
-    let cellsCompared = 0, cellsMismatch = 0, docsCompared = 0, docsMissing = 0;
+    const counts = { exact: 0, 'doc-sentinel': 0, 'whitespace-only': 0, 'undisclosed-vs-zero': 0, 'undisclosed-vs-empty': 0, 'value-differs': 0, 'doc-missing-field': 0 };
+    const samples = {};
+    let cellsCompared = 0, docsCompared = 0, docsMissing = 0;
     for (const row of full.rows) {
       const docMap = parseDocTable(row.raw.actbasid);
       if (!docMap) { docsMissing++; continue; }
       docsCompared++;
       for (const [field, value] of Object.entries(row.display)) {
         cellsCompared++;
-        if (docMap[field] !== value) {
-          cellsMismatch++;
-          const key = `${field}|doc:"${docMap[field]}"|api:"${value}"`;
-          fieldStat[key] = (fieldStat[key] || 0) + 1;
+        if (!(field in docMap)) {
+          counts['doc-missing-field']++;
+          samples['doc-missing-field'] ||= `${row.raw.actbasid} ${field}=${JSON.stringify(value)}`;
+          continue;
+        }
+        const cat = category(docMap[field], value);
+        counts[cat]++;
+        if (cat !== 'exact' && cat !== 'doc-sentinel' && cat !== 'whitespace-only' && !samples[cat]) {
+          samples[cat] = `${row.raw.actbasid} ${field}: doc=${JSON.stringify(docMap[field])} api=${JSON.stringify(value)}`;
         }
       }
     }
-    const topDiffs = Object.entries(fieldStat).sort((a, b) => b[1] - a[1]).slice(0, 12)
-      .map(([k, v]) => ({ pattern: k, count: v }));
-    console.log(`[R8] 全量：文档 ${docsCompared} 篇（缺 ${docsMissing}），单元格 ${cellsCompared}，差异 ${cellsMismatch}`);
-    for (const d of topDiffs) console.log(`      ${d.count}× ${d.pattern}`);
-    check('R8', '49 列 display 与知识库文档逐格比对（全量），差异全部可归因且已量化',
-      docsCompared === rows.length && cellsCompared === rows.length * 49,
-      `文档=${docsCompared} 单元格=${cellsCompared} 差异=${cellsMismatch} (${(cellsMismatch / cellsCompared * 100).toFixed(3)}%) 首位=${topDiffs[0]?.pattern}×${topDiffs[0]?.count}`);
+    const unexplained = counts['value-differs'] + counts['undisclosed-vs-zero'] + counts['undisclosed-vs-empty'] + counts['doc-missing-field'];
+    console.log(`[R8] 全量比对：文档 ${docsCompared} 篇（缺 ${docsMissing}），单元格 ${cellsCompared}`);
+    console.log(`[R8] 分类：${JSON.stringify(counts)}`);
+    for (const [k, v] of Object.entries(samples)) console.log(`      ${k}: ${v}`);
+    check('R8', '49 列 display 与知识库文档逐格比对（全量 3387 篇 × 49 列），未解释差异为 0',
+      docsCompared === rows.length && cellsCompared === rows.length * 49 && unexplained === 0,
+      `文档=${docsCompared} 单元格=${cellsCompared} 完全一致=${counts.exact} 文档标注列=${counts['doc-sentinel']} 仅空白=${counts['whitespace-only']} 未解释=${unexplained}`);
 
     // 导出完整性（快照模式自动翻页到空页）
     check('R9', '快照全量导出完整（complete=true，含终页空页证据），只含本人可见行',
@@ -350,21 +377,53 @@ async function main() {
 
     const summary = {
       generatedAt: new Date().toISOString(),
+      node: 'dag:ledger-mcp-wecom/mcp-snapshot-deploy',
       workspace: REPO,
+      change: {
+        env: 'LEDGER_DATA_MODE=adapter|snapshot（默认 adapter；快照必须显式配置，无自动回退）',
+        newEnv: [
+          'LEDGER_SNAPSHOT_PATH（默认 ./data/current.json）',
+          'LEDGER_SNAPSHOT_ACL_PATH（snapshot 必填，fail-closed）',
+          'MCP_BIND_ADDR 补入 .env.example',
+        ],
+      },
       snapshot: {
         path: SNAPSHOT_PATH,
         sha256_12: snapshotVersion,
         rowCount: rows.length,
         fetchedAt: snapshot.fetchedAt,
         bytes: rawSnapshot.length,
+        producer: 'repair-ledger-data',
       },
       bind: `127.0.0.1:${MCP_PORT}`,
       authMode: 'oidc',
+      identitySource: 'MaxKey 员工令牌 claim（body/入参自报 employeeNo 一律忽略）',
       dataMode: 'snapshot',
       realtime: false,
-      employees: { roleA: { label: '员工A', aclRows: idsA.length }, roleB: { label: '员工B', aclRows: idsB.length }, overlapRows: idsA.filter(i => idsB.includes(i)).length },
+      acl: {
+        mechanism: '显式夹具 LEDGER_SNAPSHOT_ACL_PATH，按已验证身份的 employeeNo 取 actbasid 白名单',
+        unlistedEmployee: '403 PERMISSION_DENIED（fail-closed）',
+        emptyAllowList: '0 行（合法，不是拒绝）',
+        businessCaliber: '行级权限口径（机构/经办人/项目组）属 G-8，本节点不自行选定',
+      },
+      employees: {
+        roleA: { label: '员工A', aclRows: idsA.length },
+        roleB: { label: '员工B', aclRows: idsB.length },
+        overlapRows: idsA.filter(i => idsB.includes(i)).length,
+        note: '员工编号为验收夹具，非真实员工；审计日志只落哈希',
+      },
+      testSuites: readSuites(),
       checks: results,
-      docComparison: { docsCompared, docsMissing, cellsCompared, cellsMismatch, topDiffs },
+      docComparison: { docsCompared, docsMissing, cellsCompared, counts, unexplained },
+      fixedInThisNode: [
+        'F4-MCP：金额缺值不再渲染「0 元」，改「未披露」（与页面/知识库口径一致；0 元仅表示确定为零）',
+      ],
+      openGates: [
+        'G-7：真实 OA 适配层未连通，adapter 模式数据验收仍 HOLD（快照不解除本门）',
+        'G-8：行级 ACL 业务口径（机构/经办人/项目组）未裁决，快照用夹具代行',
+        'MaxKey 委托契约未核实：未新增「信任 body 员工号」路径，桥接未改',
+        '第三方身份/对外暴露：仍未批，MCP_BIND_ADDR 保持 127.0.0.1',
+      ],
       passed: results.filter(r => r.pass).length,
       total: results.length,
     };

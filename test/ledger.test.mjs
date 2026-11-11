@@ -123,7 +123,11 @@ test('display mapping preserves page formulas, units, raw-code fallback and dupl
   assert.equal(display.placeholder_201, '2,000 元');
   assert.equal(display.placeholder_202, '16.68 元');
   assert.equal(display.placeholder_203, '8,000 元');
-  assert.equal(display.repaycapital, '0 元');
+  // 金额缺值 = 未披露（不是 0 元）；确定为零才显示 0 元
+  assert.equal(display.repaycapital, '未披露');
+  assert.equal(display.realpaycapital, '未披露');
+  assert.equal(toLedgerDisplayRow({ ...baseRow, realpaycapital: 0 }).realpaycapital, '0 元');
+  assert.equal(toLedgerDisplayRow({ ...baseRow, realall: '0.00' }).realall, '0 元');
   assert.equal(display.projtype, '保理 0');
   assert.equal(display.actsts, '正常');
   assert.equal(display.biztype, '内部业务');

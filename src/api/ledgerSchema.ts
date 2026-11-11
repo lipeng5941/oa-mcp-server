@@ -136,10 +136,13 @@ function formatNumber(value: unknown): string | null {
   }).format(number);
 }
 
-function currency(value: unknown, monthlyFallback = false): string | null {
+// 金额缺值：页面/知识库口径为「未披露」，不得渲染成「0 元」——
+// 0 元 = 确定为零（如已结清），未披露 = 上游本期没给值，两者混同会误导阅读方。
+const UNDISCLOSED = '未披露';
+
+function currency(value: unknown): string | null {
   const formatted = formatNumber(value);
-  const effective = formatted ?? (monthlyFallback ? '0' : null);
-  return effective === null ? null : `${effective} 元`;
+  return formatted === null ? UNDISCLOSED : `${formatted} 元`;
 }
 
 function percent(value: unknown): string | null {
@@ -163,7 +166,7 @@ export function toLedgerDisplayRow(row: LedgerRawRow): Record<string, unknown> {
         display[column.field] = currency(value);
         break;
       case 'monthlyCurrency':
-        display[column.field] = currency(value, true);
+        display[column.field] = currency(value);
         break;
       case 'percent':
         display[column.field] = percent(value);
@@ -181,7 +184,7 @@ export function toLedgerDisplayRow(row: LedgerRawRow): Record<string, unknown> {
       case 'repaymentType': {
         const repayment = codeText('SG005', row.rettyp);
         if (String(row.rettyp) !== '1' && String(row.rettyp) !== '5') {
-          // 页面函数即使两个代码都为空也保留逗号，不能按“更干净”的口径擅自删掉。
+          // 页面函数即使两个代码都为空也保留逗号与逗号后的空格（不能按“更干净”的口径删掉）
           display[column.field] = `${codeText('SG003', row.inttyp)}, ${repayment}`;
         } else {
           display[column.field] = repayment;

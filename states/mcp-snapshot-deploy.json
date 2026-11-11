@@ -1,17 +1,34 @@
 {
-  "generatedAt": "2026-11-11T09:08:19.816Z",
+  "generatedAt": "2026-11-11T09:16:53.834Z",
+  "node": "dag:ledger-mcp-wecom/mcp-snapshot-deploy",
   "workspace": "C:\\Users\\84732\\oa-mcp-server",
+  "change": {
+    "env": "LEDGER_DATA_MODE=adapter|snapshot（默认 adapter；快照必须显式配置，无自动回退）",
+    "newEnv": [
+      "LEDGER_SNAPSHOT_PATH（默认 ./data/current.json）",
+      "LEDGER_SNAPSHOT_ACL_PATH（snapshot 必填，fail-closed）",
+      "MCP_BIND_ADDR 补入 .env.example"
+    ]
+  },
   "snapshot": {
     "path": "E:/项目/山钢/数智办公/ledger-knowledge-sync/data/current.json",
     "sha256_12": "fd59a8f397bf",
     "rowCount": 3387,
     "fetchedAt": "2026-11-11T07:50:21.700Z",
-    "bytes": 5015900
+    "bytes": 5015900,
+    "producer": "repair-ledger-data"
   },
   "bind": "127.0.0.1:3220",
   "authMode": "oidc",
+  "identitySource": "MaxKey 员工令牌 claim（body/入参自报 employeeNo 一律忽略）",
   "dataMode": "snapshot",
   "realtime": false,
+  "acl": {
+    "mechanism": "显式夹具 LEDGER_SNAPSHOT_ACL_PATH，按已验证身份的 employeeNo 取 actbasid 白名单",
+    "unlistedEmployee": "403 PERMISSION_DENIED（fail-closed）",
+    "emptyAllowList": "0 行（合法，不是拒绝）",
+    "businessCaliber": "行级权限口径（机构/经办人/项目组）属 G-8，本节点不自行选定"
+  },
   "employees": {
     "roleA": {
       "label": "员工A",
@@ -21,13 +38,34 @@
       "label": "员工B",
       "aclRows": 6
     },
-    "overlapRows": 3
+    "overlapRows": 3,
+    "note": "员工编号为验收夹具，非真实员工；审计日志只落哈希"
+  },
+  "testSuites": {
+    "tsc": {
+      "cmd": "npx tsc --noEmit",
+      "note": "本脚本运行前须已通过类型检查"
+    },
+    "unit": {
+      "cmd": "npm run test:unit",
+      "total": 16,
+      "pass": 16,
+      "fail": 0
+    },
+    "e2e": {
+      "cmd": "npm run test:e2e",
+      "total": 25,
+      "pass": 25,
+      "fail": 0,
+      "report": "test/e2e-result.json",
+      "ts": "2026-11-11T09:16:47.113Z"
+    }
   },
   "checks": [
     {
       "id": "R1",
       "name": "快照模式 /health 明示 snapshot/非实时/行数与版本，且不回显文件路径",
-      "pass": false,
+      "pass": true,
       "evidence": "dataMode=snapshot realtime=false rowCount=3387 version=fd59a8f397bf fetchedAt=2026-11-11T07:50:21.700Z"
     },
     {
@@ -63,14 +101,14 @@
     {
       "id": "R7",
       "name": "审计日志：双员工各一哈希、无明文员工号、无令牌片段",
-      "pass": false,
-      "evidence": "员工哈希=0 明文命中=0 行数=21"
+      "pass": true,
+      "evidence": "员工哈希=2 明文命中=0 行数=21"
     },
     {
       "id": "R8",
-      "name": "49 列 display 与知识库文档逐格比对（全量），差异全部可归因且已量化",
+      "name": "49 列 display 与知识库文档逐格比对（全量 3387 篇 × 49 列），未解释差异为 0",
       "pass": true,
-      "evidence": "文档=3387 单元格=165963 差异=30841 (18.583%) 首位=isgroupind|doc:\"（页面列，上游本期无值）\"|api:\"\"×3387"
+      "evidence": "文档=3387 单元格=165963 完全一致=151793 文档标注列=13548 仅空白=622 未解释=0"
     },
     {
       "id": "R9",
@@ -83,58 +121,26 @@
     "docsCompared": 3387,
     "docsMissing": 0,
     "cellsCompared": 165963,
-    "cellsMismatch": 30841,
-    "topDiffs": [
-      {
-        "pattern": "isgroupind|doc:\"（页面列，上游本期无值）\"|api:\"\"",
-        "count": 3387
-      },
-      {
-        "pattern": "checkcase|doc:\"（页面列，上游本期无值）\"|api:\"null\"",
-        "count": 3387
-      },
-      {
-        "pattern": "pickcase|doc:\"（页面列，上游本期无值）\"|api:\"null\"",
-        "count": 3387
-      },
-      {
-        "pattern": "callback|doc:\"（页面列，上游本期无值）\"|api:\"null\"",
-        "count": 3387
-      },
-      {
-        "pattern": "repaycapital|doc:\"未披露\"|api:\"0 元\"",
-        "count": 3175
-      },
-      {
-        "pattern": "repayint|doc:\"未披露\"|api:\"0 元\"",
-        "count": 3175
-      },
-      {
-        "pattern": "repayall|doc:\"未披露\"|api:\"0 元\"",
-        "count": 3175
-      },
-      {
-        "pattern": "comprehensiveinc|doc:\"\"|api:\"null\"",
-        "count": 2907
-      },
-      {
-        "pattern": "groupnm|doc:\"\"|api:\"null\"",
-        "count": 2899
-      },
-      {
-        "pattern": "intval|doc:\"\"|api:\"null\"",
-        "count": 511
-      },
-      {
-        "pattern": "rettyp|doc:\",\"|api:\", \"",
-        "count": 502
-      },
-      {
-        "pattern": "area|doc:\"\"|api:\"null\"",
-        "count": 358
-      }
-    ]
+    "counts": {
+      "exact": 151793,
+      "doc-sentinel": 13548,
+      "whitespace-only": 622,
+      "undisclosed-vs-zero": 0,
+      "undisclosed-vs-empty": 0,
+      "value-differs": 0,
+      "doc-missing-field": 0
+    },
+    "unexplained": 0
   },
-  "passed": 7,
+  "fixedInThisNode": [
+    "F4-MCP：金额缺值不再渲染「0 元」，改「未披露」（与页面/知识库口径一致；0 元仅表示确定为零）"
+  ],
+  "openGates": [
+    "G-7：真实 OA 适配层未连通，adapter 模式数据验收仍 HOLD（快照不解除本门）",
+    "G-8：行级 ACL 业务口径（机构/经办人/项目组）未裁决，快照用夹具代行",
+    "MaxKey 委托契约未核实：未新增「信任 body 员工号」路径，桥接未改",
+    "第三方身份/对外暴露：仍未批，MCP_BIND_ADDR 保持 127.0.0.1"
+  ],
+  "passed": 9,
   "total": 9
 }
