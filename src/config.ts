@@ -3,8 +3,14 @@
 
 export type AuthMode = 'oidc' | 'oauth2-userinfo';
 
+// 监听地址白名单：默认回环；显式 0.0.0.0 才绑所有网卡（对外暴露需单独审批，见 docs/对外暴露与鉴权说明_V1.0.md）
+export const BIND_ADDRS = ['127.0.0.1', '0.0.0.0'] as const;
+export type BindAddr = typeof BIND_ADDRS[number];
+export const DEFAULT_BIND_ADDR: BindAddr = '127.0.0.1';
+
 export interface ServerConfig {
   port: number;
+  bindAddr: BindAddr;             // MCP_BIND_ADDR，默认 127.0.0.1（只监听本机回环）
   publicUrl: string;              // MCP_PUBLIC_URL，对外完整 URL（PRM / metadata 用）
   authMode: AuthMode;             // oidc = 方案A（JWT+JWKS 验签）；oauth2-userinfo = 方案A'（userinfo 校验）
   issuer: string;                 // MAXKEY_ISSUER，如 https://pttest.sgscf.com/sign
@@ -89,6 +95,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     problems.push(`MCP_PORT 非法: "${portRaw}"`);
   }
 
+  const bindAddrRaw = (env.MCP_BIND_ADDR || '').trim() || DEFAULT_BIND_ADDR;
+  if (!(BIND_ADDRS as readonly string[]).includes(bindAddrRaw)) {
+    problems.push(`MCP_BIND_ADDR 只允许 ${BIND_ADDRS.join(' / ')}，当前值: "${bindAddrRaw}"`);
+  }
+  const bindAddr = bindAddrRaw as BindAddr;
+
   const corsRaw = (env.CORS_ALLOWED_ORIGINS || '').trim();
   const corsAllowAll = corsRaw === '*';
   const corsAllowedOrigins = corsAllowAll ? [] : corsRaw.split(',').map(s => s.trim()).filter(Boolean);
@@ -111,6 +123,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
 
   return {
     port,
+    bindAddr,
     publicUrl: publicUrl.replace(/\/+$/, ''),
     authMode,
     issuer,
