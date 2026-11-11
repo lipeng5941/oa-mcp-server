@@ -1,0 +1,160 @@
+{
+  "node": "ledger-mcp-wecom/mcp-local-hardening",
+  "plan_ref": "E:/项目/山钢/数智办公/ledger-knowledge-sync/IMPLEMENTATION_PLAN_V1.0.md#L1-4",
+  "project": "C:/Users/84732/oa-mcp-server",
+  "executed_at": "2026-11-11T15:36:00+08:00",
+  "reported_at": "2026-11-11T15:41:00+08:00",
+  "scope_declared": [
+    "C:/Users/84732/oa-mcp-server/docs/对外暴露与鉴权说明_V1.0.md",
+    "C:/Users/84732/oa-mcp-server/src/api/ledgerSchema.ts",
+    "C:/Users/84732/oa-mcp-server/src/config.ts",
+    "C:/Users/84732/oa-mcp-server/src/index.ts",
+    "C:/Users/84732/oa-mcp-server/states/dag-mcp-local.json",
+    "C:/Users/84732/oa-mcp-server/test/e2e-result.json",
+    "C:/Users/84732/oa-mcp-server/test/ledger.test.mjs"
+  ],
+  "changes": [
+    {
+      "file": "src/config.ts",
+      "kind": "config",
+      "summary": "新增 BIND_ADDRS 白名单与 DEFAULT_BIND_ADDR=127.0.0.1；ServerConfig 增加 bindAddr；MCP_BIND_ADDR 空白取默认、非白名单值 fail（ConfigError）",
+      "credential_touched": false
+    },
+    {
+      "file": "src/index.ts",
+      "kind": "server",
+      "summary": "app.listen(cfg.port, cfg.bindAddr)；/health 增 adapter 探测（TCP 连接 1.5s 超时、5s 缓存、只返回 configured|unreachable，不回显 URL/JWT/上游错误）；0.0.0.0 时启动打印暴露警告",
+      "credential_touched": false
+    },
+    {
+      "file": "src/api/ledgerSchema.ts",
+      "kind": "comment-only",
+      "summary": "在 LEDGER_COLUMNS 上方补注释说明 placeholder_199..203 与页面 columns 425~429 重复语义列的关系、sourceField 映射与\"不得改名\"约束；未改任何取值/顺序/键名",
+      "credential_touched": false
+    },
+    {
+      "file": "test/ledger.test.mjs",
+      "kind": "test",
+      "summary": "新增 3 条：MCP_BIND_ADDR 默认回环+非法值拒绝；placeholder 列 sourceField 与格式化取值不受注释影响；/health adapter 字面量且不泄漏适配层 URL/服务 JWT（起真实进程 + mock TCP 端口）",
+      "credential_touched": false
+    },
+    {
+      "file": "docs/对外暴露与鉴权说明_V1.0.md",
+      "kind": "doc",
+      "summary": "新建：监听地址口径、/health adapter 语义（configured≠数据可用）、身份不可放宽清单、actsts=2 上游 500 限制、G-7/第三方身份/对外暴露三门 HOLD",
+      "credential_touched": false
+    }
+  ],
+  "commands": [
+    {
+      "cmd": "npx tsc --noEmit",
+      "cwd": "C:/Users/84732/oa-mcp-server",
+      "exit_code": 0,
+      "result": "无输出（类型检查通过）"
+    },
+    {
+      "cmd": "npm run build",
+      "cwd": "C:/Users/84732/oa-mcp-server",
+      "exit_code": 0,
+      "result": "tsc 重新产出 dist/"
+    },
+    {
+      "cmd": "npm run test:unit",
+      "cwd": "C:/Users/84732/oa-mcp-server",
+      "exit_code": 0,
+      "result": "tests 11 / pass 11 / fail 0（原 8 + 新增 3）",
+      "detail": [
+        "schema contains all 49 page columns and stable filter/dictionary contracts — pass",
+        "display mapping preserves page formulas, units, raw-code fallback and duplicate columns — pass",
+        "search returns raw+display rows and forwards filters without employee input — pass",
+        "export traverses to terminal empty page and preserves every row — pass",
+        "export refuses repeated pages — pass",
+        "export refuses upstream total changes — pass",
+        "export refuses totals above maxRows — pass",
+        "invalid filters and upstream malformed bodies fail closed — pass",
+        "MCP_BIND_ADDR defaults to loopback and fails closed on any address outside the whitelist — pass (新增)",
+        "placeholder columns keep their page source fields and formatted values (comment-only change) — pass (新增)",
+        "health reports adapter as a literal and never echoes adapter URL or service JWT — pass (新增, 13800ms)"
+      ]
+    },
+    {
+      "cmd": "npm run test:e2e",
+      "cwd": "C:/Users/84732/oa-mcp-server",
+      "exit_code": 0,
+      "result": "18/18 通过；报告 test/e2e-result.json（gitignored，按需重跑生成）",
+      "key_evidence": [
+        "P0a 健康检查: {\"status\":\"ok\",\"version\":\"2.0.0\",\"authMode\":\"oidc\",\"adapter\":\"configured\"}",
+        "PASS [2] 无凭证访问返回 401 且带 WWW-Authenticate(resource_metadata) — 保持拒绝",
+        "PASS [4b] 会话劫持防护：他人令牌复用已有会话被拒 — status=401 保持拒绝",
+        "PASS [3] badSig/expired/wrongAud 均 401；PASS [3b] 缺 employeeNumber claim 的令牌 401",
+        "PASS [4]/[L4] 双账号行级隔离；PASS [6] 审计无明文员工号/令牌",
+        "三次启动日志均为 listening on 127.0.0.1:3100（默认绑定生效）"
+      ],
+      "mock_disclaimer": "e2e 使用 mock MaxKey IdP + mock OA 适配层；mock ≠ 真实适配层，18/18 只证明协议与权限逻辑，不代表数据可用或生产可用"
+    },
+    {
+      "cmd": "node dist/index.js http (MCP_PORT=3391, 默认 MCP_BIND_ADDR) + netstat -ano | grep 3391",
+      "cwd": "C:/Users/84732/oa-mcp-server",
+      "exit_code": 0,
+      "result": "TCP 127.0.0.1:3391 0.0.0.0:0 LISTENING；/health = {\"status\":\"ok\",\"version\":\"2.0.0\",\"authMode\":\"oidc\",\"adapter\":\"unreachable\"}（适配层端口 3999 无监听）"
+    },
+    {
+      "cmd": "MCP_BIND_ADDR=10.0.0.5 node dist/index.js http",
+      "cwd": "C:/Users/84732/oa-mcp-server",
+      "exit_code": 2,
+      "result": "配置错误: - MCP_BIND_ADDR 只允许 127.0.0.1 / 0.0.0.0，当前值: \"10.0.0.5\""
+    },
+    {
+      "cmd": "MCP_BIND_ADDR=0.0.0.0 node dist/index.js http (MCP_PORT=3392) + netstat",
+      "cwd": "C:/Users/84732/oa-mcp-server",
+      "exit_code": 0,
+      "result": "TCP 0.0.0.0:3392 LISTENING，并打印\"会把服务暴露到所有网卡\"警告（显式 opt-in，未部署）"
+    },
+    {
+      "cmd": "python -m json.tool states/dag-mcp-local.json",
+      "cwd": "C:/Users/84732/oa-mcp-server",
+      "exit_code": 0,
+      "result": "本文件合法 JSON"
+    }
+  ],
+  "verification_matrix": {
+    "tsc_noEmit_exit0": true,
+    "unit_tests": "11/11",
+    "unit_tests_at_least_10": true,
+    "new_tests_at_least_2": 3,
+    "no_token_still_401": true,
+    "session_identity_mismatch_still_401": true,
+    "bind_default_loopback_observed": "netstat TCP 127.0.0.1:3391",
+    "health_adapter_literal_no_leak": true,
+    "placeholder_values_unchanged": true,
+    "e2e_mock_disclaimer_kept": true,
+    "maxkey_employee_token_relaxed": false,
+    "shared_static_key_introduced": false,
+    "deployed_externally": false
+  },
+  "not_verified": [
+    "真实 OA 适配层（G-7）：仅用 mock + 本机 TCP 探测验证协议，未连接真实适配层，未验证真实 49 列取值与分页 total",
+    "第三方身份路径未定未批：未验证任何第三方调用方式，未新增 client/Key",
+    "actsts=2 上游 500 未复现：本节点不连真实上游，该结论沿用 source-scout G2 的记录，未在本节点重新实测",
+    "对外暴露（公网/TLS/反代/白名单）未做，也未验证",
+    "MaxKey 真实 IdP 未连：e2e 为本地 mock RSA/JWKS",
+    "MCP_BIND_ADDR 未写入 .env.example（该文件不在本节点 write_scope），需在 L2/部署节点补"
+  ],
+  "holds": [
+    "G-7 真实适配层 — HOLD",
+    "第三方身份方案 — HOLD（未批，不得自拟）",
+    "对外部署 — HOLD（未批）",
+    "数据验收（字段一致性逐字符比对）— HOLD，依赖 G-7"
+  ],
+  "rollback": "git revert 到 1fec5fb（本节点前基线）；仅回滚行为层面也可只删 MCP_BIND_ADDR 显式配置，但默认值已改为 127.0.0.1，旧 0.0.0.0 行为需显式设置",
+  "git": {
+    "baseline_commit": "1fec5fb",
+    "note": "src/config.ts 已被 15:36 auto-sync 提交（ccf71df，仅该文件）；其余改动由本节点在 ccf71df 之后提交，git diff 可审",
+    "diffstat_before_commit": {
+      "src/api/ledgerSchema.ts": "+9",
+      "src/index.ts": "+63/-5",
+      "test/ledger.test.mjs": "+138",
+      "docs/对外暴露与鉴权说明_V1.0.md": "新增"
+    }
+  }
+}

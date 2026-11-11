@@ -40,6 +40,15 @@ const col = (
 ): LedgerColumn => ({ field, title, kind, ...extras });
 
 // 顺序与 2026-11-11 测试环境页面 datagrid options.columns 完全一致。
+//
+// 关于 placeholder_199 ~ placeholder_203（只说明命名来源，不改变任何取值）：
+//   页面 columns 的 field 名在 425~429 号位置上是重复的语义列（参与投资额 / 尚未收回的本金 /
+//   已收回本金 / 已收回利息 / 尚未收回的本金 同名同键），datagrid 以数组位置区分、不以 field 去重。
+//   为了在 MCP 输出里保持 49 个互不覆盖的键，这 5 列改用 placeholder_199..203 作为输出键，
+//   并通过 sourceField 指回真实上游字段（projamt / avlblc / takeamt / realpayint / avlblc）。
+//   因此：placeholder_NNN 只是"输出键占位名"，不是新字段，也不代表上游有同名属性；
+//   取值一律来自 sourceField，格式化规则与其它列完全相同（见 toLedgerDisplayRow）。
+//   任何"给 placeholder 改名/改 sourceField/合并重复列"的动作都会破坏与 L1-2 文档表格的逐字符一致性。
 export const LEDGER_COLUMNS: LedgerColumn[] = [
   col('crtorg', '公司名称'),
   col('projectnm', '项目名称'),

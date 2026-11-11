@@ -13,6 +13,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import express from 'express';
 import { randomBytes, randomUUID } from 'crypto';
+import { connect as netConnect } from 'net';
 import { z } from 'zod';
 import { loadConfig, ServerConfig, ConfigError } from './config';
 import { AuditLogger } from './audit';
@@ -221,6 +222,52 @@ function corsMiddleware(cfg: ServerConfig) {
   };
 }
 
+// ---------- 适配层可达性探测（仅状态字面量，不回显 URL/JWT） ----------
+
+export type AdapterState = 'configured' | 'unreachable';
+
+const ADAPTER_PROBE_TIMEOUT_MS = 1500;
+const ADAPTER_PROBE_TTL_MS = 5000;
+let adapterProbeCache: { at: number; state: AdapterState } | null = null;
+
+// 只做 TCP 连接探测：不发送服务 JWT、不带员工身份、不读上游错误体。
+function tcpProbe(hostname: string, port: number, timeoutMs: number): Promise<boolean> {
+  return new Promise(resolve => {
+    const socket = netConnect({ host: hostname, port });
+    let settled = false;
+    const done = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(timeoutMs, () => done(false));
+    socket.once('connect', () => done(true));
+    socket.once('error', () => done(false));
+  });
+}
+
+// configured = 已配置 OA_ADAPTER_URL 且端口可达；unreachable = 探测失败（未接入/网络不通/服务异常）。
+// 返回值只有这两种字面量，健康检查响应中不出现适配层地址、服务 JWT 或上游错误内容。
+export async function probeAdapter(cfg: ServerConfig): Promise<AdapterState> {
+  if (!cfg.adapterUrl) return 'unreachable';
+  const now = Date.now();
+  if (adapterProbeCache && now - adapterProbeCache.at < ADAPTER_PROBE_TTL_MS) {
+    return adapterProbeCache.state;
+  }
+  let state: AdapterState = 'unreachable';
+  try {
+    const parsed = new URL(cfg.adapterUrl);
+    const port = Number(parsed.port) || (parsed.protocol === 'https:' ? 443 : 80);
+    state = (await tcpProbe(parsed.hostname, port, ADAPTER_PROBE_TIMEOUT_MS)) ? 'configured' : 'unreachable';
+  } catch {
+    state = 'unreachable';
+  }
+  adapterProbeCache = { at: now, state };
+  return state;
+}
+
 // ---------- HTTP 服务 ----------
 
 async function startHttpServer(cfg: ServerConfig): Promise<void> {
@@ -234,8 +281,11 @@ async function startHttpServer(cfg: ServerConfig): Promise<void> {
   app.use(corsMiddleware(cfg));
 
   // 无鉴权：健康检查与 OAuth 元数据
-  app.get('/health', (_req, res) => {
-    res.json({ status: 'ok', version: SERVER_VERSION, authMode: cfg.authMode });
+  // adapter 只暴露状态字面量：configured（已配置且端口可达）/ unreachable（未接入或探测失败）。
+  // 不返回适配层 URL、服务 JWT、上游错误体——本次加固不对外部署，探测结果不代表数据可用。
+  app.get('/health', async (_req, res) => {
+    const adapter = await probeAdapter(cfg);
+    res.json({ status: 'ok', version: SERVER_VERSION, authMode: cfg.authMode, adapter });
   });
   app.use(buildMetadataRouter(cfg));
 
@@ -402,9 +452,12 @@ async function startHttpServer(cfg: ServerConfig): Promise<void> {
     });
   });
 
-  app.listen(cfg.port, () => {
-    audit.log({ event: 'server_start', detail: `mode=${cfg.authMode} port=${cfg.port}` });
-    console.log(`SGS OA MCP Server ${SERVER_VERSION} (unified-auth, ${cfg.authMode}) listening on 0.0.0.0:${cfg.port}`);
+  app.listen(cfg.port, cfg.bindAddr, () => {
+    audit.log({ event: 'server_start', detail: `mode=${cfg.authMode} bind=${cfg.bindAddr} port=${cfg.port}` });
+    console.log(`SGS OA MCP Server ${SERVER_VERSION} (unified-auth, ${cfg.authMode}) listening on ${cfg.bindAddr}:${cfg.port}`);
+    if (cfg.bindAddr === '0.0.0.0') {
+      console.warn('警告：MCP_BIND_ADDR=0.0.0.0 会把服务暴露到所有网卡，仅在明确批准的对外暴露场景使用。');
+    }
   });
 }
 
