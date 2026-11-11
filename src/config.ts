@@ -19,6 +19,8 @@ export interface ServerConfig {
   adapterUrl: string;             // OA 内部适配层基址（仅内网）
   adapterServiceJwt: string;      // 服务间 JWT（密钥托管注入，禁止入库）
   adapterTimeoutMs: number;
+  ledgerExportMaxRows: number;    // 在投业务台账单次全量取数硬上限
+  ledgerExportPageSize: number;   // 全量取数上游分页大小
   auditLogPath: string;
   auditHashSalt: string;
   rateLimitRps: number;
@@ -96,6 +98,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     problems.push(`USERINFO_TOKEN_METHOD 必须为 bearer 或 query，当前值: "${userinfoTokenMethodRaw}"`);
   }
 
+  const ledgerExportMaxRows = Number((env.LEDGER_EXPORT_MAX_ROWS || '10000').trim());
+  if (!Number.isInteger(ledgerExportMaxRows) || ledgerExportMaxRows < 1 || ledgerExportMaxRows > 10000) {
+    problems.push('LEDGER_EXPORT_MAX_ROWS 必须是 1-10000 的整数');
+  }
+  const ledgerExportPageSize = Number((env.LEDGER_EXPORT_PAGE_SIZE || '200').trim());
+  if (!Number.isInteger(ledgerExportPageSize) || ledgerExportPageSize < 1 || ledgerExportPageSize > 200) {
+    problems.push('LEDGER_EXPORT_PAGE_SIZE 必须是 1-200 的整数');
+  }
+
   if (problems.length > 0) throw new ConfigError(problems);
 
   return {
@@ -114,6 +125,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     adapterUrl: adapterUrl.replace(/\/+$/, ''),
     adapterServiceJwt,
     adapterTimeoutMs: Number((env.OA_ADAPTER_TIMEOUT_MS || '30000').trim()) || 30000,
+    ledgerExportMaxRows,
+    ledgerExportPageSize,
     auditLogPath,
     auditHashSalt: (env.AUDIT_HASH_SALT || '').trim(),
     rateLimitRps,

@@ -112,11 +112,14 @@ export interface LedgerExportResult extends Omit<LedgerPageResult, 'pagination'>
   rows: unknown[];
   export: {
     complete: boolean;
-    total: number;
+    reportedTotal: number;
     rowCount: number;
+    totalMatchesRowCount: boolean;
     uniqueIds: number;
     duplicateIds: string[];
     pagesFetched: number;
+    dataPagesFetched: number;
+    terminalEmptyPage: boolean;
     pageSize: number;
     sort: string;
     order: LedgerSortOrder;

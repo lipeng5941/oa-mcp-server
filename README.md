@@ -32,7 +32,7 @@ npm start              # node dist/index.js（HTTP 模式）
 ### 开发测试
 
 ```bash
-node test/e2e.mjs      # 本地端到端：mock MaxKey IdP（真 RSA/JWKS）+ mock OA 适配层，13 项断言
+node test/e2e.mjs      # 本地端到端：mock MaxKey IdP（真 RSA/JWKS）+ mock OA 适配层，18 项断言
 ```
 
 ## 端点
@@ -53,6 +53,21 @@ node test/e2e.mjs      # 本地端到端：mock MaxKey IdP（真 RSA/JWKS）+ mo
 | get_office_detail | 办公场所详情 |
 | search_room | 查询会议室（本人权限） |
 | get_room_detail | 会议室详情 |
+| get_investment_ledger_schema | 在投业务台账49列、筛选项与字典 |
+| search_investment_ledger | 在投业务台账筛选与分页查询（本人OA权限） |
+| export_investment_ledger | 自动翻完在投业务台账全部页面并做完整性检查 |
+
+### 在投业务台账
+
+数据来源：统一数据管理 → 投后数据统计 → 在投业务台账 → 在投业务台账列表。上游接口为 `/oamgr/SGMGR/sgproj/sgproj/list?type=1`。
+
+- `view=raw`：返回 OA 原始字段，包含页面未展示的项目 ID、客户 ID 等。
+- `view=display`：返回与页面 datagrid 一致的49列，保留金额单位、百分比和字典中文值。
+- `view=both`：每行同时返回 `raw` 和 `display`，为默认值。
+- 日常问答使用 `search_investment_ledger` 分页查询；批量取数使用 `export_investment_ledger`，它会翻到终止空页，不静默截断。
+- 2026-11-11 测试环境实测上游 `total=3571`、实际取得 `3387` 行、终止空页为第19页（每页请求200行）。因此结果分别报告 `reportedTotal` 与 `rowCount`，不强行把二者改成一致。
+
+三方 Agent 配置：远程 MCP URL 为 `{MCP_PUBLIC_URL}/mcp`，传输为 Streamable HTTP，认证使用本服务已配置的 MaxKey OAuth；不支持 OAuth 的旧客户端可调用同鉴权的 `/api/v1/tools/*` REST 端点。
 
 ## 安全红线（实现已强制）
 
@@ -64,6 +79,8 @@ node test/e2e.mjs      # 本地端到端：mock MaxKey IdP（真 RSA/JWKS）+ mo
 
 ## 文档
 
+- `docs/在投业务台账MCP接入说明_V1.0.md` —— 台账工具、真实报文、调用关系图、流程图、时序图与三方接入
+- `docs/verification/在投业务台账MCP独立验收_2026-11-11.md` —— 独立验收8项、异常处理与最终复验
 - `docs/迁移方案定版_V1.1.md` —— 方案定版与交付清单
 - `docs/MaxKey管理员前置申请单.md` —— 转发给 MaxKey 管理员
 - `docs/OA适配层接口规范.md` —— 转发给 OA 开发

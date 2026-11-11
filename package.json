@@ -9,7 +9,9 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "node --test test/",
+    "test": "npm run test:unit && npm run test:e2e",
+    "test:unit": "node --test test/ledger.test.mjs",
+    "test:e2e": "node test/e2e.mjs",
     "prepublishOnly": "npm run build && npm test"
   },
   "keywords": [

@@ -34,12 +34,21 @@ Body: JSON 参数
 | office | detail | `{officeid}` | /SGSMTOAMGR/oa/office/detail（GET+query） |
 | meetroom | list | `{roomnm?, capacity?, building?, current=1, size=15}` | /SGSMTOAMGR/oa/meetroom/list |
 | meetroom | detail | `{roomid}` | /SGSMTOAMGR/oa/meetroom/detail（GET+query） |
+| investment-ledger | list | `{projectnm?, projectno?, cusnm?, ctrtcode?, compcusnm?, site?, actsts?, dealdate?, current=1, size=15, sort?, order?}` | /SGMGR/sgproj/sgproj/list?type=1（POST form；适配层把 current/size 转为 page/rows） |
 
 ### 2.3 响应约定
 - 成功：`200` + 原 OA 响应体（含 `result.rows/totalCount` 结构，MCP 透传 `result`）；
 - 员工未映射：`404 {"error":"employee not mapped"}`（MCP 对用户返回「无该员工对应数据」，不泄漏细节）；
 - 服务认证失败：`401`；
 - 其它错误：4xx/5xx + JSON（MCP 不透传错误体给用户，只记审计）。
+
+### 2.4 在投业务台账特殊约定
+
+- 成功响应保留 EasyUI 原结构：`{total, rows}`；不要裁字段，MCP 的 `raw` 视图需要项目 ID、客户 ID 等页面未展示字段。
+- `actsts`：`1=正常、2=逾期、3=已结清`；`dealdate`：`YYYY-MM-DD`。
+- 2026-11-11 测试环境实测：上游 `total=3571`，请求 200 行时各数据页实际返回 169-200 行，第 19 页返回 0 行。适配层不得用空行补齐，也不得把 total 改写成实际行数。
+- MCP 全量工具会继续翻到空页，分别返回 `reportedTotal` 和 `rowCount`，并检测总数变化、重复页、重复业务 ID 和缺失 ID。
+- 权限必须由 OA 原有用户上下文执行；禁止把管理员的共享 Cookie 或共享会话用于三方调用。
 
 ## 三、内部实现要点（建议）
 

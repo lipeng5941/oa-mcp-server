@@ -21,6 +21,8 @@ import { verifyBearerToken, parseAuthorizationHeader, AuthError, VerifiedIdentit
 import { buildMetadataRouter, wwwAuthenticateHeader } from './auth/metadata';
 import { searchOffice, getOfficeDetail } from './api/office';
 import { searchRoom, getRoomDetail } from './api/room';
+import { searchInvestmentLedger, exportInvestmentLedger, getInvestmentLedgerSchema, LedgerDataError } from './api/ledger';
+import { LEDGER_SORT_FIELDS } from './api/ledgerSchema';
 import { OfficeSearchParams } from './types/office';
 import { RoomSearchParams } from './types/room';
 
@@ -104,6 +106,48 @@ function buildMcpServer(
     inputSchema: { roomid: z.string().describe('会议室ID') },
   }, async ({ roomid }) =>
     runTool('get_room_detail', () => getRoomDetail(cfg, identity, roomid, reqId)));
+
+  const ledgerFilterShape = {
+    projectnm: z.string().trim().max(200).optional().describe('项目名称，模糊查询'),
+    projectno: z.string().trim().max(200).optional().describe('项目编号'),
+    cusnm: z.string().trim().max(200).optional().describe('客户名称'),
+    ctrtcode: z.string().trim().max(200).optional().describe('合同编号'),
+    compcusnm: z.string().trim().max(200).optional().describe('所属集团/核心企业/付款人'),
+    site: z.string().trim().max(200).optional().describe('项目所在地'),
+    actsts: z.enum(['1', '2', '3']).optional().describe('项目状态：1=正常，2=逾期，3=已结清；不传表示全部'),
+    dealdate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('截至该日期未结清项目，YYYY-MM-DD'),
+  };
+  const ledgerViewSchema = z.enum(['raw', 'display', 'both']).default('both')
+    .describe('raw=OA原始字段，display=页面49列，both=两者都返回');
+
+  server.registerTool('get_investment_ledger_schema', {
+    title: '获取在投业务台账字段与字典',
+    description: '获取统一数据管理→投后数据统计→在投业务台账的49个页面列、查询条件、排序字段和状态/业务类型字典。',
+    inputSchema: {},
+  }, async () => runTool('get_investment_ledger_schema', async () => getInvestmentLedgerSchema()));
+
+  server.registerTool('search_investment_ledger', {
+    title: '查询在投业务台账',
+    description: '按当前登录人的OA权限查询在投业务台账。支持项目、客户、合同、所在地、状态筛选与分页；默认同时返回原始字段和页面展示值。',
+    inputSchema: {
+      ...ledgerFilterShape,
+      current: z.number().int().min(1).default(1).describe('页码，从1开始'),
+      size: z.number().int().min(1).max(100).default(15).describe('每页条数，最大100'),
+      sort: z.enum(LEDGER_SORT_FIELDS).optional().describe('排序字段'),
+      order: z.enum(['asc', 'desc']).optional().describe('排序方向'),
+      view: ledgerViewSchema,
+    },
+  }, async (args) => runTool('search_investment_ledger', () => searchInvestmentLedger(cfg, identity, args, reqId)));
+
+  server.registerTool('export_investment_ledger', {
+    title: '获取全部在投业务台账',
+    description: '自动顺序翻完当前筛选条件下的全部台账，直到上游返回空页。校验总数变化、重复页与缺失ID；不静默截断。适合批量取数，日常问答优先使用分页查询。',
+    inputSchema: {
+      ...ledgerFilterShape,
+      view: ledgerViewSchema,
+      maxRows: z.number().int().min(1).max(10000).optional().describe('安全上限，默认取服务端配置；超过上限直接报错，不返回截断数据'),
+    },
+  }, async (args) => runTool('export_investment_ledger', () => exportInvestmentLedger(cfg, identity, args, reqId)));
 
   return server;
 }
@@ -298,7 +342,12 @@ async function startHttpServer(cfg: ServerConfig): Promise<void> {
           employeeNoHash: empHash, clientId: identity.clientId,
           status: 'error', latencyMs: Date.now() - t0, detail: msg,
         });
-        res.status(502).json({ success: false, error: msg });
+        const invalidArgument = error instanceof LedgerDataError;
+        res.status(invalidArgument ? 400 : 502).json({
+          success: false,
+          error: msg,
+          code: invalidArgument ? 'INVALID_ARGUMENT' : 'UPSTREAM_ERROR',
+        });
       }
     };
 
@@ -329,6 +378,15 @@ async function startHttpServer(cfg: ServerConfig): Promise<void> {
   app.post('/api/v1/tools/get_room_detail', auth, restCall('get_room_detail', (req) =>
     getRoomDetail(cfg, req.identity!, req.body.roomid, req.reqId!)));
 
+  app.get('/api/v1/tools/investment_ledger/schema', auth, restCall('get_investment_ledger_schema', async () =>
+    getInvestmentLedgerSchema()));
+
+  app.post('/api/v1/tools/search_investment_ledger', auth, restCall('search_investment_ledger', (req) =>
+    searchInvestmentLedger(cfg, req.identity!, req.body || {}, req.reqId!)));
+
+  app.post('/api/v1/tools/export_investment_ledger', auth, restCall('export_investment_ledger', (req) =>
+    exportInvestmentLedger(cfg, req.identity!, req.body || {}, req.reqId!)));
+
   app.get('/api/v1/tools', auth, (req, res) => {
     res.json({
       success: true,
@@ -337,6 +395,9 @@ async function startHttpServer(cfg: ServerConfig): Promise<void> {
         { name: 'get_office_detail', description: '获取办公场所详情', params: { officeid: 'string (必填)' } },
         { name: 'search_room', description: '查询会议室列表（本人权限）', params: { roomnm: 'string (可选)', capacity: 'number (可选)', building: 'string (可选)', current: 'number', size: 'number' } },
         { name: 'get_room_detail', description: '获取会议室详情', params: { roomid: 'string (必填)' } },
+        { name: 'get_investment_ledger_schema', description: '获取在投业务台账49列、筛选项和字典', params: {} },
+        { name: 'search_investment_ledger', description: '按本人OA权限筛选并分页查询在投业务台账', params: { current: 'number', size: 'number (最大100)', view: 'raw|display|both' } },
+        { name: 'export_investment_ledger', description: '自动翻完在投业务台账全部页面并做完整性检查', params: { view: 'raw|display|both', maxRows: 'number (可选)' } },
       ],
     });
   });

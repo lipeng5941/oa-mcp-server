@@ -111,6 +111,22 @@ const OA_DATA = {
   'E1001': { rows: [{ officeid: 'OF-001', officenm: '济南总部1801会议室所在楼层' }], totalCount: 1 },
   'E2002': { rows: [{ officeid: 'OF-001', officenm: '济南总部1801会议室所在楼层' }, { officeid: 'OF-002', officenm: '青岛分部办公区' }], totalCount: 2 },
 };
+const ledgerBase = {
+  cusid: 'C-TEST', cusnm: '测试客户', projectnm: '测试台账项目', projectno: '',
+  projtype: '0', sgtype: '12', actsts: '1', biztype: '1', rettyp: '1',
+  projamt: 10000, avlblc: 8000, takeamt: 2000, realpayint: 25, yield: 3.5,
+};
+const LEDGER_DATA = {
+  E1001: [
+    { ...ledgerBase, actbasid: 'LA-001', projectid: 'LP-001', projectnm: '台账项目A1' },
+    { ...ledgerBase, actbasid: 'LA-002', projectid: 'LP-002', projectnm: '台账项目A2' },
+    { ...ledgerBase, actbasid: 'LA-003', projectid: 'LP-003', projectnm: '台账项目A3' },
+  ],
+  E2002: [
+    { ...ledgerBase, actbasid: 'LA-001', projectid: 'LP-001', projectnm: '台账项目A1' },
+    { ...ledgerBase, actbasid: 'LB-001', projectid: 'LP-B01', projectnm: '台账项目B1' },
+  ],
+};
 const adapterCalls = [];
 const adapterServer = createServer((req, res) => {
   let body = '';
@@ -128,6 +144,21 @@ const adapterServer = createServer((req, res) => {
     if (!emp) {
       res.statusCode = 400;
       return res.end('{"error":"missing x-employee-no"}');
+    }
+    if (req.url === '/v1/investment-ledger/list') {
+      const ledgerRows = LEDGER_DATA[emp];
+      if (!ledgerRows) {
+        res.statusCode = 404;
+        return res.end('{"error":"employee not mapped"}');
+      }
+      const params = JSON.parse(body || '{}');
+      const current = params.current || 1;
+      const size = params.size || 15;
+      const start = (current - 1) * size;
+      return res.end(JSON.stringify({
+        total: ledgerRows.length,
+        rows: ledgerRows.slice(start, start + size),
+      }));
     }
     const data = OA_DATA[emp];
     if (!data) {
@@ -157,6 +188,8 @@ function startMcpServer(envExtra, auditPath) {
     AUDIT_LOG_PATH: auditPath,
     AUDIT_HASH_SALT: 'test-salt',
     RATE_LIMIT_RPS: '10',
+    LEDGER_EXPORT_PAGE_SIZE: '2',
+    LEDGER_EXPORT_MAX_ROWS: '100',
     ...envExtra,
   };
   const child = spawn(process.execPath, [path.join(REPO, 'dist/index.js'), 'http'], {
@@ -237,6 +270,12 @@ async function mcpCallTool(token, sid, name, args, id = 42) {
   return { status: r.status, body: await r.text() };
 }
 
+function toolPayload(response) {
+  const rpc = JSON.parse(response.body);
+  if (rpc.error) throw new Error(JSON.stringify(rpc.error));
+  return JSON.parse(rpc.result.content[0].text);
+}
+
 async function main() {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sgs-oa-mcp-e2e-'));
   const auditPath = path.join(tmpDir, 'audit.log');
@@ -292,6 +331,39 @@ async function main() {
     check(1, '有效身份访问：账号A令牌→initialize+tools/call 返回本人数据',
       pass1, `init=${initA.status} sid=${initA.sid} tool响应含OF-001=${String(dataA || '').includes('OF-001')}`);
 
+    const schemaResponse = await mcpCallTool(tokenA, initA.sid, 'get_investment_ledger_schema', {});
+    const ledgerSchema = toolPayload(schemaResponse);
+    check('L1', '在投业务台账 schema 工具返回49列、8个筛选项与字典',
+      schemaResponse.status === 200 && ledgerSchema.columns.length === 49 && ledgerSchema.filters.length === 8 && ledgerSchema.codeSets.SG002['2'] === '逾期',
+      `columns=${ledgerSchema.columns.length} filters=${ledgerSchema.filters.length}`);
+
+    const ledgerSearchResponse = await mcpCallTool(tokenA, initA.sid, 'search_investment_ledger', { current: 1, size: 2, view: 'both' });
+    const ledgerSearch = toolPayload(ledgerSearchResponse);
+    const firstLedgerRow = ledgerSearch.rows[0];
+    check('L2', '在投业务台账分页查询同时返回 raw/display 且不泄漏B账号项目',
+      ledgerSearch.pagination.total === 3 && ledgerSearch.rows.length === 2 &&
+      firstLedgerRow.raw.projectid === 'LP-001' && firstLedgerRow.display.actsts === '正常' &&
+      firstLedgerRow.display.projamt === '10,000 元' && !ledgerSearchResponse.body.includes('LP-B01'),
+      `total=${ledgerSearch.pagination.total} pageRows=${ledgerSearch.rows.length} display49=${Object.keys(firstLedgerRow.display).length}`);
+
+    const ledgerExportResponse = await mcpCallTool(tokenA, initA.sid, 'export_investment_ledger', { view: 'raw', maxRows: 10 });
+    const ledgerExport = toolPayload(ledgerExportResponse);
+    check('L3', '在投业务台账全量工具自动翻到空页并保留全部本人记录',
+      ledgerExport.export.complete === true && ledgerExport.export.rowCount === 3 &&
+      ledgerExport.export.reportedTotal === 3 && ledgerExport.export.pagesFetched === 3 &&
+      ledgerExport.rows.length === 3 && !ledgerExportResponse.body.includes('LP-B01'),
+      `complete=${ledgerExport.export.complete} rows=${ledgerExport.export.rowCount} pages=${ledgerExport.export.pagesFetched}`);
+
+    const restInvalidResponse = await fetch(`${MCP_URL}/api/v1/tools/search_investment_ledger`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${tokenA}` },
+      body: JSON.stringify({ size: 101 }),
+    });
+    const restInvalidBody = await restInvalidResponse.json();
+    check('L5', '台账 REST 与 MCP 共用参数边界：size=101 返回400 INVALID_ARGUMENT',
+      restInvalidResponse.status === 400 && restInvalidBody.success === false && restInvalidBody.code === 'INVALID_ARGUMENT',
+      `status=${restInvalidResponse.status} code=${restInvalidBody.code}`);
+
     // ===== 验收项4：双账号行级权限隔离（账号B: E2002 看到更多行） =====
     const tokenB = mintToken({ employeeNo: 'E2002', sub: 'user-b-uuid' });
     const initB = await mcpInitialize(tokenB);
@@ -301,6 +373,11 @@ async function main() {
     check(4, '双账号行级权限隔离：A只见1行、B见2行（按员工编号透传）',
       initB.status === 200 && aSeesOne && bSeesTwo,
       `A只见OF-001=${aSeesOne}; B见OF-001+OF-002=${bSeesTwo}`);
+
+    const ledgerBResponse = await mcpCallTool(tokenB, initB.sid, 'search_investment_ledger', { view: 'raw' });
+    check('L4', '在投业务台账双账号行级隔离：B可见LP-B01且不见LP-A02',
+      ledgerBResponse.body.includes('LP-B01') && !ledgerBResponse.body.includes('LP-002'),
+      `B台账含LP-B01=${ledgerBResponse.body.includes('LP-B01')} 含LP-002=${ledgerBResponse.body.includes('LP-002')}`);
 
     // 会话身份绑定：用 B 的会话 + A 的令牌调用，必须 401
     const hijack = await mcpCallTool(tokenA, initB.sid, 'search_office', {}, 99);
