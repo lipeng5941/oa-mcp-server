@@ -1,7 +1,12 @@
 // ============ 统一认证版配置加载（严格校验，无默认密钥） ============
 // 红线：任何凭据（client_secret / 服务 JWT / 静态 API Key）不得有硬编码默认值。
 
+import * as fs from 'fs';
+
 export type AuthMode = 'oidc' | 'oauth2-userinfo';
+
+// 台账数据来源：adapter（默认，实时 OA 适配层）/ snapshot（本地 data/current.json 快照，非实时）
+export type LedgerDataMode = 'adapter' | 'snapshot';
 
 // 监听地址白名单：默认回环；显式 0.0.0.0 才绑所有网卡（对外暴露需单独审批，见 docs/对外暴露与鉴权说明_V1.0.md）
 export const BIND_ADDRS = ['127.0.0.1', '0.0.0.0'] as const;
@@ -22,6 +27,9 @@ export interface ServerConfig {
   audience: string;               // 令牌 audience（aud 校验值，默认=clientId）
   employeeNoClaim: string;        // 员工编号 Claim 名（以 MaxKey Claim Mapper 配置为准）
   employeeNoFallbackSub: boolean; // 员工编号 Claim 缺失时是否允许退回 sub（默认 false）
+  ledgerDataMode: LedgerDataMode; // LEDGER_DATA_MODE，默认 adapter（实时适配层）
+  ledgerSnapshotPath: string;     // LEDGER_SNAPSHOT_PATH，快照文件（默认 ./data/current.json），仅 snapshot 模式读取
+  ledgerSnapshotAclPath: string;  // LEDGER_SNAPSHOT_ACL_PATH，快照模式行级权限夹具，必填（fail-closed）
   adapterUrl: string;             // OA 内部适配层基址（仅内网）
   adapterServiceJwt: string;      // 服务间 JWT（密钥托管注入，禁止入库）
   adapterTimeoutMs: number;
@@ -68,8 +76,35 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const authorizeUrl = requireEnv(env, 'MAXKEY_AUTHORIZE_URL', problems);
   const tokenUrl = requireEnv(env, 'MAXKEY_TOKEN_URL', problems);
   const clientId = requireEnv(env, 'MCP_CLIENT_ID', problems);
-  const adapterUrl = requireEnv(env, 'OA_ADAPTER_URL', problems);
-  const adapterServiceJwt = requireEnv(env, 'OA_ADAPTER_SERVICE_JWT', problems);
+
+  // 台账数据来源：默认 adapter（实时适配层）。snapshot 必须显式配置，绝不做自动回退。
+  const ledgerDataModeRaw = (env.LEDGER_DATA_MODE || '').trim().toLowerCase() || 'adapter';
+  if (ledgerDataModeRaw !== 'adapter' && ledgerDataModeRaw !== 'snapshot') {
+    problems.push(`LEDGER_DATA_MODE 只能为 adapter（默认，实时 OA 适配层）或 snapshot（本地快照，非实时），当前值: "${ledgerDataModeRaw}"`);
+  }
+  const ledgerDataMode = ledgerDataModeRaw as LedgerDataMode;
+
+  // 适配层配置只在 adapter 模式必填；snapshot 模式不连 OA，也不允许拿假服务 JWT 充数。
+  const adapterUrl = ledgerDataMode === 'adapter'
+    ? requireEnv(env, 'OA_ADAPTER_URL', problems)
+    : (env.OA_ADAPTER_URL || '').trim();
+  const adapterServiceJwt = ledgerDataMode === 'adapter'
+    ? requireEnv(env, 'OA_ADAPTER_SERVICE_JWT', problems)
+    : (env.OA_ADAPTER_SERVICE_JWT || '').trim();
+
+  const ledgerSnapshotPath = (env.LEDGER_SNAPSHOT_PATH || '').trim() || './data/current.json';
+  const ledgerSnapshotAclPath = (env.LEDGER_SNAPSHOT_ACL_PATH || '').trim();
+  if (ledgerDataMode === 'snapshot') {
+    if (!ledgerSnapshotAclPath) {
+      // fail-closed：没有 ACL 夹具就一行都不放行，宁可拒绝也不给出「全员可见」
+      problems.push('LEDGER_DATA_MODE=snapshot 时 LEDGER_SNAPSHOT_ACL_PATH 必填（按员工裁剪行的权限夹具；未配置即不放行任何数据）');
+    } else if (!fs.existsSync(ledgerSnapshotAclPath)) {
+      problems.push(`LEDGER_SNAPSHOT_ACL_PATH 指向的文件不存在: ${ledgerSnapshotAclPath}`);
+    }
+    if (!fs.existsSync(ledgerSnapshotPath)) {
+      problems.push(`LEDGER_SNAPSHOT_PATH 指向的快照文件不存在: ${ledgerSnapshotPath}`);
+    }
+  }
 
   let jwksUrl = (env.MAXKEY_JWKS_URL || '').trim();
   if (authMode === 'oidc' && !jwksUrl) {
@@ -135,6 +170,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     audience: (env.MAXKEY_AUDIENCE || '').trim() || clientId,
     employeeNoClaim: (env.EMPLOYEE_NO_CLAIM || '').trim() || 'employeeNumber',
     employeeNoFallbackSub: ((env.EMPLOYEE_NO_FALLBACK_SUB || 'false').trim().toLowerCase() === 'true'),
+    ledgerDataMode,
+    ledgerSnapshotPath,
+    ledgerSnapshotAclPath,
     adapterUrl: adapterUrl.replace(/\/+$/, ''),
     adapterServiceJwt,
     adapterTimeoutMs: Number((env.OA_ADAPTER_TIMEOUT_MS || '30000').trim()) || 30000,

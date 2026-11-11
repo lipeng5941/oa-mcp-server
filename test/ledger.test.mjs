@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { loadConfig } from '../dist/config.js';
 import { searchInvestmentLedger, exportInvestmentLedger, getInvestmentLedgerSchema } from '../dist/api/ledger.js';
 import { toLedgerDisplayRow, LEDGER_COLUMNS } from '../dist/api/ledgerSchema.js';
@@ -313,11 +316,151 @@ test('health reports adapter as a literal and never echoes adapter URL or servic
   assert.equal(up.status, 200);
   assert.equal(up.json.adapter, 'configured');
 
-  // 3) 响应只有四个字段，且不含适配层地址/服务 JWT/上游错误内容
-  assert.deepEqual(Object.keys(up.json).sort(), ['adapter', 'authMode', 'status', 'version']);
+  // 3) 响应只有六个字段，且不含适配层地址/服务 JWT/上游错误内容
+  assert.deepEqual(Object.keys(up.json).sort(), ['adapter', 'authMode', 'dataMode', 'realtime', 'status', 'version']);
   for (const body of [down.text, JSON.stringify(up.json)]) {
     assert.ok(!body.includes(upAddr) && !body.includes(unreachableAddr), '健康检查回显了适配层 URL');
     assert.ok(!body.includes(serviceJwt), '健康检查回显了服务 JWT');
     assert.ok(!/被拒绝|ECONNREFUSED|fetch failed/.test(body), '健康检查泄漏上游错误细节');
   }
 });
+
+// ---------- 快照模式（LEDGER_DATA_MODE=snapshot） ----------
+
+function snapshotFixture(rows, acl, extraDoc = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-snapshot-'));
+  const snapPath = path.join(dir, 'current.json');
+  const aclPath = path.join(dir, 'acl.json');
+  fs.writeFileSync(snapPath, JSON.stringify({
+    schemaVersion: 1,
+    source: { environment: 'test', menu: ['统一数据管理', '投后数据统计', '在投业务台账', '在投业务台账列表'], endpoint: '/oamgr/SGMGR/sgproj/sgproj/list?type=1' },
+    fetchedAt: '2026-11-11T07:50:21.700Z',
+    integrity: { reportedTotal: rows.length, rowCount: rows.length, totalMatchesRowCount: true },
+    rows,
+    ...extraDoc,
+  }));
+  fs.writeFileSync(aclPath, JSON.stringify({ schemaVersion: 1, employees: acl }));
+  return { dir, snapPath, aclPath };
+}
+
+function snapshotConfig(fixture, extra = {}) {
+  return config(1, {
+    LEDGER_DATA_MODE: 'snapshot',
+    LEDGER_SNAPSHOT_PATH: fixture.snapPath,
+    LEDGER_SNAPSHOT_ACL_PATH: fixture.aclPath,
+    ...extra,
+  });
+}
+
+const snapRows = [
+  { ...baseRow, actbasid: 'S-001', projectid: 'SP-001', projectno: 'PX-1', projectnm: '绿电一号', cusnm: '甲公司', site: '济南', actsts: '1', avlblc: 100 },
+  { ...baseRow, actbasid: 'S-002', projectid: 'SP-002', projectno: 'PX-10', projectnm: '绿电二号', cusnm: '乙公司', site: '青岛', actsts: '2', avlblc: 200 },
+  { ...baseRow, actbasid: 'S-003', projectid: 'SP-003', projectno: 'PX-3', projectnm: '钢贸一号', cusnm: '甲公司', site: '济南', actsts: '1', avlblc: 300 },
+  { ...baseRow, actbasid: 'S-004', projectid: 'SP-004', projectno: 'PX-4', projectnm: '钢贸二号', cusnm: '丙公司', site: '淄博', actsts: '3', avlblc: 400 },
+  { ...baseRow, actbasid: 'S-005', projectid: 'SP-005', projectno: 'PX-5', projectnm: '租赁一号', cusnm: '丁公司', site: '临沂', actsts: '1', avlblc: 500 },
+];
+
+test('LEDGER_DATA_MODE defaults to adapter; snapshot requires explicit snapshot + ACL and fails closed', () => {
+  assert.equal(config(3003).ledgerDataMode, 'adapter');
+  assert.equal(config(3003, { LEDGER_DATA_MODE: '  ' }).ledgerDataMode, 'adapter');
+  assert.throws(() => config(3003, { LEDGER_DATA_MODE: 'realtime' }), /LEDGER_DATA_MODE/);
+  assert.throws(() => config(3003, { LEDGER_DATA_MODE: 'snapshot' }), /LEDGER_SNAPSHOT_ACL_PATH/);
+
+  const fixture = snapshotFixture(snapRows, { E1001: ['S-001'] });
+  // snapshot 模式不连适配层：不提供 OA_ADAPTER_URL / 服务 JWT 也必须能启动
+  const snap = snapshotConfig(fixture, { OA_ADAPTER_URL: undefined, OA_ADAPTER_SERVICE_JWT: undefined });
+  assert.equal(snap.ledgerDataMode, 'snapshot');
+  assert.equal(snap.adapterServiceJwt, '');
+  assert.equal(snap.adapterUrl, '');
+  assert.throws(() => snapshotConfig(fixture, { LEDGER_SNAPSHOT_ACL_PATH: path.join(fixture.dir, 'nope.json') }), /不存在/);
+  assert.throws(() => snapshotConfig(fixture, { LEDGER_SNAPSHOT_PATH: path.join(fixture.dir, 'nope.json') }), /快照文件不存在/);
+});
+
+test('snapshot search keeps 49-column display, filters, sorting and pagination without a network call', async () => {
+  const fixture = snapshotFixture(snapRows, { E1001: snapRows.map(r => r.actbasid) });
+  const cfg = snapshotConfig(fixture);
+
+  const page = await searchInvestmentLedger(cfg, identity, { current: 2, size: 2, view: 'both' }, 'req-snap-page');
+  assert.equal(page.pagination.total, 5);
+  assert.equal(page.pagination.totalPages, 3);
+  assert.equal(page.pagination.hasNext, true);
+  assert.equal(page.rows.length, 2);
+  assert.equal(page.rows[0].raw.actbasid, 'S-003');
+  assert.equal(Object.keys(page.rows[0].display).length, 49);
+  assert.equal(page.rows[0].display.avlblc, '300 元');
+  assert.equal(page._meta.dataMode, 'snapshot');
+  assert.equal(page._meta.realtime, false);
+  assert.equal(page._meta.snapshotRowCount, 5);
+  assert.equal(page._meta.snapshotFetchedAt, '2026-11-11T07:50:21.700Z');
+
+  // 名称类：包含匹配；编号类：精确匹配（PX-1 不得命中 PX-10）
+  const byName = await searchInvestmentLedger(cfg, identity, { projectnm: '绿电' }, 'req-snap-name');
+  assert.equal(byName.pagination.total, 2);
+  const byNo = await searchInvestmentLedger(cfg, identity, { projectno: 'PX-1' }, 'req-snap-no');
+  assert.deepEqual(byNo.rows.map(r => r.raw.actbasid), ['S-001']);
+  const byStatus = await searchInvestmentLedger(cfg, identity, { actsts: '1' }, 'req-snap-sts');
+  assert.equal(byStatus.pagination.total, 3);
+  const byCity = await searchInvestmentLedger(cfg, identity, { site: '济南' }, 'req-snap-site');
+  assert.equal(byCity.pagination.total, 2);
+
+  const sorted = await searchInvestmentLedger(cfg, identity, { sort: 'avlblc', order: 'desc', size: 5 }, 'req-snap-sort');
+  assert.deepEqual(sorted.rows.map(r => r.raw.actbasid), ['S-005', 'S-004', 'S-003', 'S-002', 'S-001']);
+});
+
+test('snapshot ACL isolates employees by verified JWT identity and ignores body-supplied employee numbers', async () => {
+  const fixture = snapshotFixture(snapRows, {
+    E1001: ['S-001', 'S-003'],
+    E2002: ['S-002', 'S-004'],
+    E9009: [],
+  });
+  const cfg = snapshotConfig(fixture);
+
+  // body/入参里自报员工号不参与任何决策：identity 仍是 E1001
+  const a = await searchInvestmentLedger(cfg, identity, { employeeNo: 'E2002', employees: ['E2002'], view: 'raw' }, 'req-snap-a');
+  assert.deepEqual(a.rows.map(r => r.actbasid), ['S-001', 'S-003']);
+  assert.equal(a.pagination.total, 2);
+
+  const b = await searchInvestmentLedger(cfg, { ...identity, employeeNo: 'E2002' }, { view: 'raw' }, 'req-snap-b');
+  assert.deepEqual(b.rows.map(r => r.actbasid), ['S-002', 'S-004']);
+
+  // 在 ACL 内但授权为空 → 0 行（合法）
+  const empty = await searchInvestmentLedger(cfg, { ...identity, employeeNo: 'E9009' }, { view: 'raw' }, 'req-snap-empty');
+  assert.equal(empty.pagination.total, 0);
+
+  // ACL 未覆盖该员工 → 拒绝（fail-closed，绝不退化成全员可见）
+  await assert.rejects(
+    searchInvestmentLedger(cfg, { ...identity, employeeNo: 'E3003' }, { view: 'raw' }, 'req-snap-forbid'),
+    /不在快照 ACL 覆盖范围内/,
+  );
+
+  // 筛选不能扩大 ACL 可见范围
+  const filtered = await searchInvestmentLedger(cfg, identity, { projectno: 'PX-4', view: 'raw' }, 'req-snap-filter-acl');
+  assert.equal(filtered.pagination.total, 0);
+});
+
+test('snapshot mode refuses filters whose semantics only exist in the OA adapter', async () => {
+  const fixture = snapshotFixture(snapRows, { E1001: snapRows.map(r => r.actbasid) });
+  const cfg = snapshotConfig(fixture);
+  await assert.rejects(
+    searchInvestmentLedger(cfg, identity, { compcusnm: '某集团' }, 'req-snap-compcusnm'),
+    /snapshot 模式不支持 compcusnm/,
+  );
+  await assert.rejects(
+    searchInvestmentLedger(cfg, identity, { dealdate: '2026-11-11' }, 'req-snap-dealdate'),
+    /snapshot 模式不支持 dealdate/,
+  );
+});
+
+test('snapshot export returns only ACL-visible rows and marks the payload as non-realtime', async () => {
+  const fixture = snapshotFixture(snapRows, { E1001: ['S-001', 'S-002', 'S-005'] });
+  const cfg = snapshotConfig(fixture);
+  const result = await exportInvestmentLedger(cfg, identity, { view: 'raw' }, 'req-snap-export');
+  assert.equal(result.export.complete, true);
+  assert.equal(result.export.rowCount, 3);
+  assert.equal(result.export.reportedTotal, 3);
+  assert.equal(result.export.terminalEmptyPage, true);
+  assert.deepEqual(result.rows.map(r => r.actbasid), ['S-001', 'S-002', 'S-005']);
+  assert.equal(result._meta.dataMode, 'snapshot');
+  assert.equal(result._meta.realtime, false);
+});
+

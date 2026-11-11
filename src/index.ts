@@ -22,7 +22,7 @@ import { verifyBearerToken, parseAuthorizationHeader, AuthError, VerifiedIdentit
 import { buildMetadataRouter, wwwAuthenticateHeader } from './auth/metadata';
 import { searchOffice, getOfficeDetail } from './api/office';
 import { searchRoom, getRoomDetail } from './api/room';
-import { searchInvestmentLedger, exportInvestmentLedger, getInvestmentLedgerSchema, LedgerDataError } from './api/ledger';
+import { searchInvestmentLedger, exportInvestmentLedger, getInvestmentLedgerSchema, getLedgerSnapshotSummary, LedgerDataError, LedgerPermissionError } from './api/ledger';
 import { LEDGER_SORT_FIELDS } from './api/ledgerSchema';
 import { OfficeSearchParams } from './types/office';
 import { RoomSearchParams } from './types/room';
@@ -125,7 +125,7 @@ function buildMcpServer(
     title: '获取在投业务台账字段与字典',
     description: '获取统一数据管理→投后数据统计→在投业务台账的49个页面列、查询条件、排序字段和状态/业务类型字典。',
     inputSchema: {},
-  }, async () => runTool('get_investment_ledger_schema', async () => getInvestmentLedgerSchema()));
+  }, async () => runTool('get_investment_ledger_schema', async () => getInvestmentLedgerSchema(cfg)));
 
   server.registerTool('search_investment_ledger', {
     title: '查询在投业务台账',
@@ -283,9 +283,29 @@ async function startHttpServer(cfg: ServerConfig): Promise<void> {
   // 无鉴权：健康检查与 OAuth 元数据
   // adapter 只暴露状态字面量：configured（已配置且端口可达）/ unreachable（未接入或探测失败）。
   // 不返回适配层 URL、服务 JWT、上游错误体——本次加固不对外部署，探测结果不代表数据可用。
+  // dataMode=snapshot 时 realtime 固定 false，并回快照版本/行数：调用方不得把快照当实时 OA。
   app.get('/health', async (_req, res) => {
+    if (cfg.ledgerDataMode === 'snapshot') {
+      return res.json({
+        status: 'ok',
+        version: SERVER_VERSION,
+        authMode: cfg.authMode,
+        dataMode: 'snapshot',
+        realtime: false,
+        note: '快照数据（本地 data/current.json），非实时 OA；写入/变更不会反映',
+        adapter: null,
+        snapshot: getLedgerSnapshotSummary(cfg),
+      });
+    }
     const adapter = await probeAdapter(cfg);
-    res.json({ status: 'ok', version: SERVER_VERSION, authMode: cfg.authMode, adapter });
+    return res.json({
+      status: 'ok',
+      version: SERVER_VERSION,
+      authMode: cfg.authMode,
+      dataMode: 'adapter',
+      realtime: true,
+      adapter,
+    });
   });
   app.use(buildMetadataRouter(cfg));
 
@@ -392,11 +412,12 @@ async function startHttpServer(cfg: ServerConfig): Promise<void> {
           employeeNoHash: empHash, clientId: identity.clientId,
           status: 'error', latencyMs: Date.now() - t0, detail: msg,
         });
+        const permissionDenied = error instanceof LedgerPermissionError;
         const invalidArgument = error instanceof LedgerDataError;
-        res.status(invalidArgument ? 400 : 502).json({
+        res.status(permissionDenied ? 403 : invalidArgument ? 400 : 502).json({
           success: false,
           error: msg,
-          code: invalidArgument ? 'INVALID_ARGUMENT' : 'UPSTREAM_ERROR',
+          code: permissionDenied ? 'PERMISSION_DENIED' : invalidArgument ? 'INVALID_ARGUMENT' : 'UPSTREAM_ERROR',
         });
       }
     };
@@ -429,7 +450,7 @@ async function startHttpServer(cfg: ServerConfig): Promise<void> {
     getRoomDetail(cfg, req.identity!, req.body.roomid, req.reqId!)));
 
   app.get('/api/v1/tools/investment_ledger/schema', auth, restCall('get_investment_ledger_schema', async () =>
-    getInvestmentLedgerSchema()));
+    getInvestmentLedgerSchema(cfg)));
 
   app.post('/api/v1/tools/search_investment_ledger', auth, restCall('search_investment_ledger', (req) =>
     searchInvestmentLedger(cfg, req.identity!, req.body || {}, req.reqId!)));
@@ -453,8 +474,11 @@ async function startHttpServer(cfg: ServerConfig): Promise<void> {
   });
 
   app.listen(cfg.port, cfg.bindAddr, () => {
-    audit.log({ event: 'server_start', detail: `mode=${cfg.authMode} bind=${cfg.bindAddr} port=${cfg.port}` });
-    console.log(`SGS OA MCP Server ${SERVER_VERSION} (unified-auth, ${cfg.authMode}) listening on ${cfg.bindAddr}:${cfg.port}`);
+    audit.log({ event: 'server_start', detail: `mode=${cfg.authMode} data=${cfg.ledgerDataMode} bind=${cfg.bindAddr} port=${cfg.port}` });
+    console.log(`SGS OA MCP Server ${SERVER_VERSION} (unified-auth, ${cfg.authMode}, ledger=${cfg.ledgerDataMode}) listening on ${cfg.bindAddr}:${cfg.port}`);
+    if (cfg.ledgerDataMode === 'snapshot') {
+      console.log('台账数据源 = snapshot（本地快照，非实时 OA）；OA 适配层不参与本次服务。');
+    }
     if (cfg.bindAddr === '0.0.0.0') {
       console.warn('警告：MCP_BIND_ADDR=0.0.0.0 会把服务暴露到所有网卡，仅在明确批准的对外暴露场景使用。');
     }

@@ -1,0 +1,254 @@
+{
+  "schema": "maxkey-delegation-check/v1",
+  "node": "dag:ledger-mcp-wecom/maxkey-delegation-check",
+  "checked_at": "2026-11-11T16:57:39+08:00",
+  "mode": "read_only",
+  "authorization_note": "未使用任何凭据；未注册应用；未构造 client_id/client_secret；未调用任何写入接口",
+  "target": {
+    "instance": "https://pttest.sgscf.com/sign",
+    "version_declared_by_ops": "MaxKey 4.1.8 GA",
+    "source_evidence_ref": "github.com/dromara/maxkey tag 4.1.8",
+    "issuer_from_discovery": "http://pttest.sgscf.com/sign/maxkey"
+  },
+  "probes": [
+    {
+      "id": "P-01",
+      "purpose": "标准 OIDC 发现文档（根路径）",
+      "request": "GET https://pttest.sgscf.com/sign/.well-known/openid-configuration",
+      "http": 200,
+      "content_type": "application/json",
+      "response": "{\"code\":2,\"message\":\"Internal Server Error\",\"data\":null}",
+      "conclusion": "根路径不提供发现文档（MaxKey 不按 RFC 8414 根路径发布，与 src/auth/metadata.ts 注释一致）"
+    },
+    {
+      "id": "P-02",
+      "purpose": "标准 AS 元数据（根路径）",
+      "request": "GET https://pttest.sgscf.com/sign/.well-known/oauth-authorization-server",
+      "http": 200,
+      "content_type": "application/json",
+      "response": "{\"code\":2,\"message\":\"Internal Server Error\",\"data\":null}",
+      "conclusion": "同上，根路径无元数据"
+    },
+    {
+      "id": "P-03",
+      "purpose": "MaxKey 实际映射路径的 OIDC 发现文档",
+      "request": "GET https://pttest.sgscf.com/sign/authz/oauth/v20/.well-known/openid-configuration",
+      "http": 200,
+      "content_type": "application/json",
+      "response_excerpt": "{\"issuer\":\"http://pttest.sgscf.com/sign/maxkey\",\"authorization_endpoint\":\"http://pttest.sgscf.com/sign/authz/oauth/v20/authorize\",\"token_endpoint\":\"http://pttest.sgscf.com/sign/authz/oauth/v20/token\",\"userinfo_endpoint\":\"http://pttest.sgscf.com/sign/api/connect/v10/userinfo\",\"jwks_uri\":\"http://pttest.sgscf.com/sign/authz/oauth/v20/jwks\",\"grant_types_supported\":[\"refresh_token\",\"password\",\"client_credentials\",\"authorization_code\"],\"token_endpoint_auth_methods_supported\":[\"client_secret_post\",\"none\",\"client_secret_basic\"],\"revocation_endpoint\":null,\"introspection_endpoint\":\"http://pttest.sgscf.com/sign/authz/oauth/v20/introspect\"}",
+      "conclusion": "发现文档存在于非标准路径；明确声明支持 client_credentials，未声明任何 token-exchange / on-behalf 授权类型"
+    },
+    {
+      "id": "P-04",
+      "purpose": "AS 元数据（实际路径），用于核对 PKCE 与 scope",
+      "request": "GET https://pttest.sgscf.com/sign/authz/oauth/v20/.well-known/oauth-authorization-server",
+      "http": 200,
+      "content_type": "application/json",
+      "response_excerpt": "{\"code_challenge_methods_supported\":[\"S256\"],\"grant_types_supported\":[\"refresh_token\",\"password\",\"client_credentials\",\"authorization_code\"],\"scopes_supported\":[\"address\",\"phone\",\"openid\",\"profile\",\"email\"],\"claims_supported\":[\"sub\",\"userId\",\"preferred_username\",\"departmentId\",\"department\",\"institution\",\"displayName\",…共36项],\"revocation_endpoint\":null,\"introspection_endpoint_auth_methods_supported\":[\"client_secret_basic\"]}",
+      "conclusion": "声明 PKCE S256；scopes_supported 只有 5 个标准值，无业务 scope；claims_supported 36 项中不含 employeeNumber；revocation_endpoint 为 null"
+    },
+    {
+      "id": "P-05",
+      "purpose": "JWKS 可取性（决定 MCP 能否用 JWT 本地验签）",
+      "request": "GET https://pttest.sgscf.com/sign/authz/oauth/v20/jwks",
+      "http": 200,
+      "content_type": "application/json",
+      "response": "{\"code\":2,\"message\":\"start 169, end 2026, length 63\",\"data\":null}",
+      "conclusion": "JWKS 端点实测报错（字符串截取异常），拿不到公钥 —— AUTH_MODE=oidc（JWKS 验签）在测试实例上不可用"
+    },
+    {
+      "id": "P-06",
+      "purpose": "token 端点在缺 client 认证时对 client_credentials 的行为",
+      "request": "POST https://pttest.sgscf.com/sign/authz/oauth/v20/token  body: grant_type=client_credentials&client_id=probe-no-such-client",
+      "http": 200,
+      "content_length": 0,
+      "response": "(空响应体)",
+      "conclusion": "空 200、无 JSON 错误、无 WWW-Authenticate；由代码可知 TokenEndpointAuthenticationFilter.onUnsuccessfulAuthentication() 为空实现，失败即吞掉 —— 无法用探测区分\"不支持\"与\"未认证\""
+    },
+    {
+      "id": "P-07",
+      "purpose": "对照组：password 授权类型在同样缺认证时的行为",
+      "request": "POST .../token  body: grant_type=password&username=probe&password=probe&client_id=probe-no-such-client",
+      "http": 200,
+      "content_type": "application/json",
+      "response": "{\"error\":\"invalid_request\",\"error_description\":\"There is no client authentication. Try adding an appropriate authentication.\"}",
+      "conclusion": "password 走 TokenEndpointAuthenticationFilter 的另一分支，能返回标准错误；证明空 200 是 filter 分支差异，不是网络/网关问题"
+    },
+    {
+      "id": "P-08",
+      "purpose": "token-exchange（RFC 8693）是否被识别",
+      "request": "POST .../token  body: grant_type=urn:ietf:params:oauth:grant-type:token-exchange&subject_token=x&subject_token_type=...&client_id=probe-no-such-client",
+      "http": 200,
+      "content_length": 0,
+      "response": "(空响应体)",
+      "conclusion": "与 P-06 同形；结合源代码 token-exchange 关键字 0 命中，判定不支持（运行时无法给出 unsupported_grant_type，故以源码为判据）"
+    },
+    {
+      "id": "P-09",
+      "purpose": "授权端点是否在 client 校验前就跳登录",
+      "request": "GET https://pttest.sgscf.com/sign/authz/oauth/v20/authorize?response_type=code&client_id=probe-no-such-client&redirect_uri=https%3A%2F%2Fexample.invalid%2Fcb&scope=openid",
+      "http": 302,
+      "location": "http://pttest.sgscf.com/sgsk/passport/login?redirect_uri=<base64>",
+      "conclusion": "authorization_code 链路存活，登录被委派到外部口令系统 /sgsk/passport（非 MaxKey 内置登录页）；未登录前不校验 client_id"
+    },
+    {
+      "id": "P-10",
+      "purpose": "userinfo 端点是否需要 token 且令牌形态为何",
+      "request": "GET .../sign/api/oauth/v20/me  无令牌",
+      "http": 200,
+      "response": "{\"code\":2,\"message\":\"Cannot invoke \\\"String.matches(String)\\\" because \\\"uuidString\\\" is null\",\"data\":null}",
+      "conclusion": "无令牌时抛空指针（非 401）；说明该端点只做 UUID 形态判断，access_token 是不透明 UUID，不是 JWT"
+    },
+    {
+      "id": "P-11",
+      "purpose": "userinfo 对非 UUID 令牌的响应",
+      "request": "GET .../sign/api/oauth/v20/me  Header: Authorization: Bearer probe-not-a-uuid",
+      "http": 200,
+      "response": "{\"error_description\":\"access Token Format Invalid , access_token : probe-not-a-uuid\",\"error\":\"token Format Invalid\"}",
+      "conclusion": "确认 access_token 为 UUID 形态；OIDC userinfo 路径 /api/connect/v10/userinfo 响应完全相同（同一处理器）"
+    },
+    {
+      "id": "P-12",
+      "purpose": "userinfo 对合法 UUID 形态但不存在令牌的响应",
+      "request": "GET .../sign/api/oauth/v20/me?access_token=00000000-0000-0000-0000-000000000000",
+      "http": 200,
+      "response": "{\"error_description\":\"Invalid access token: 00000000-0000-0000-0000-000000000000\",\"error\":\"invalid_token\"}",
+      "conclusion": "端点可用、按令牌查库；错误码非 HTTP 401（MCP 侧需按 body 的 error 字段判定，现网 userinfo 校验在 HTTP 层面恒 200）"
+    },
+    {
+      "id": "P-13",
+      "purpose": "introspection 是否需要 client 认证",
+      "request": "POST .../sign/authz/oauth/v20/introspect  body: token=probe",
+      "http": 200,
+      "content_type": "application/json;charset=UTF-8",
+      "response": "{\"token\":\"probe\",\"active\":false}",
+      "conclusion": "无需任何认证即可调用 introspection，且回显 token 值（IntrospectEndpoint 里 clientAuthenticate() 定义了但未调用）；仅返回 token/active/sub，无 scope/exp"
+    }
+  ],
+  "capabilities": {
+    "authorization_code": {
+      "supported": true,
+      "verdict": "可用（限员工在场）",
+      "evidence": ["P-03", "P-09", "源码 AbstractEndpoint.java@4.1.8 注册 AuthorizationCodeTokenGranter"]
+    },
+    "refresh_token": {
+      "supported": true,
+      "verdict": "可用；默认支持（DefaultTokenServices.setSupportRefreshToken(true)）",
+      "evidence": ["P-03", "源码 Oauth20AutoConfiguration.java@4.1.8"]
+    },
+    "client_credentials": {
+      "supported": true,
+      "verdict": "语法层可用，但不承载员工身份 —— 不能用作员工委托身份",
+      "evidence": [
+        "P-03 发现文档声明",
+        "源码 AbstractEndpoint.java@4.1.8 第104行 new ClientCredentialsTokenGranter(...)",
+        "源码 IntrospectEndpoint.java@4.1.8：client_credentials 的 sub 取 OAuth2Request.getClientId()（注释 \\\"//client_credentials\\\"）",
+        "源码 TokenEndpointAuthenticationFilter.java@4.1.8：client_credentials 分支用 new SignPrincipal((User)authentication.getPrincipal())，User 来自 ClientDetailsUserDetailsService，username=clientId",
+        "源码 ClientCredentialsTokenGranter.java：按规范不发放 refresh_token"
+      ],
+      "limits": [
+        "令牌主体是 client 自身，没有 employeeNumber / department 等员工属性",
+        "userinfo 需要 SignPrincipal 的 UserInfo，client 伪用户没有对应员工记录，因此无法产出员工属性",
+        "MCP 侧要求员工编号来自已验证令牌（docs/对外暴露与鉴权说明_V1.0.md §4），client_credentials 令牌会被判 no_employee_no"
+      ]
+    },
+    "token_exchange": {
+      "supported": false,
+      "verdict": "不支持（RFC 8693 无实现）",
+      "evidence": [
+        "P-03/P-04 grant_types_supported 四项中无 urn:ietf:params:oauth:grant-type:token-exchange",
+        "GitHub 代码搜索 repo:dromara/maxkey 关键字 token-exchange / urn:ietf:params:oauth:grant-type 均 0 命中",
+        "代码搜索 impersonat 0 命中，无代持/扮演机制",
+        "OAuth2Constants.java@4.1.8 只有 5 个 GRANT_TYPE_* 常量（code/password/implicit/authorization_code/client_credentials/refresh_token）"
+      ]
+    },
+    "on_behalf_of": {
+      "supported": false,
+      "verdict": "不支持（无 act claim、无 subject_token、无 delegated token）",
+      "evidence": ["同上；claims_supported 36 项无 act/azp 之外的委托语义字段"]
+    },
+    "revocation_rfc7009": {
+      "supported": false,
+      "verdict": "未实现；只能靠短 TTL + 会话管理/force logout",
+      "evidence": [
+        "P-04 revocation_endpoint = null",
+        "代码搜索 RevokeTokenEndpoint 0 命中；endpoint 目录只有 authorize/token/check_token/token_key/introspect/jwks",
+        "发现文档提供 end_session_endpoint = http://pttest.sgscf.com/sign/force/logout（会话级登出，非令牌级撤销）"
+      ]
+    },
+    "introspection_rfc7662": {
+      "supported": true,
+      "verdict": "可用（但未做 client 认证，字段只有 token/active/sub）",
+      "evidence": ["P-13", "源码 IntrospectEndpoint.java@4.1.8"]
+    },
+    "pkce_s256": {
+      "supported": true,
+      "verdict": "元数据声明支持；是否在换码时强制校验未验证（无 client 无法测）",
+      "evidence": ["P-04 code_challenge_methods_supported=[\"S256\"]"]
+    },
+    "employee_number_claim": {
+      "supported": "userinfo 可输出，id_token 不携带",
+      "verdict": "走 userinfo（AUTH_MODE=oauth2-userinfo）可取 employeeNumber；走 JWT 不可取",
+      "evidence": [
+        "源码 OAuthDefaultUserInfoAdapter.java@4.1.8 第57行 beanMap.put(\\\"employeeNumber\\\", userInfo.getEmployeeNumber())",
+        "源码 UserInfo.java@4.1.8 第222行 protected String employeeNumber",
+        "源码 OIDCIdTokenEnhancer.java@4.1.8 仅写 sub/exp/iss/aud/jti/auth_time/nonce/at_hash，无员工属性",
+        "P-04 claims_supported 不含 employeeNumber（id_token 声明集）"
+      ],
+      "conditions": [
+        "MaxKey 用户目录里 employeeNumber 字段必须已用 OA 员工编号填充（数据问题，本次只读核查无法验证）",
+        "userinfo 返回的是扁平 JSON，MCP 默认 EMPLOYEE_NO_CLAIM=employeeNumber 与之匹配"
+      ]
+    }
+  },
+  "identity_model_observed": {
+    "access_token": "不透明 UUID（Redis/InMemory TokenStore），非 JWT",
+    "id_token": "RS256，claims 仅 sub/exp/iss/aud/jti(+auth_time/nonce)，iss 取 client 配置的 issuer，aud=[clientId]",
+    "user_binding": "authorization_code/password 令牌绑定 SignPrincipal(员工)；client_credentials 令牌绑定 client 伪用户",
+    "issuer_mismatch": "发现文档 issuer=http://pttest.sgscf.com/sign/maxkey，与工程假定的 https://pttest.sgscf.com/sign 不同（路径 /maxkey、scheme http）"
+  },
+  "implications_for_mcp": {
+    "auth_mode": "只能走 AUTH_MODE=oauth2-userinfo；AUTH_MODE=oidc 不可用（JWKS 500 + 令牌非 JWT）",
+    "employee_isolation": "只有员工在场的 authorization_code 令牌能给出员工身份；client_credentials 令牌必须被拒（no_employee_no）",
+    "audience": "无法表达 \\\"audience=MCP 资源\\\"：id_token aud 恒为 clientId，AppsOAuth20Details 的 audience 字段不进入 access_token",
+    "scope": "发现文档只声明 5 个标准 scope；per-client scope 字段是自由文本，能否登记业务 scope 需管理员确认（未验证）"
+  },
+  "verified_by": {
+    "live_probes": 13,
+    "source_files_read": [
+      "maxkey-protocols/maxkey-protocol-oauth-2.0/.../endpoint/AbstractEndpoint.java@4.1.8",
+      "maxkey-protocols/maxkey-protocol-oauth-2.0/.../endpoint/TokenEndpoint.java@4.1.8",
+      "maxkey-protocols/maxkey-protocol-oauth-2.0/.../endpoint/TokenEndpointAuthenticationFilter.java@4.1.8",
+      "maxkey-protocols/maxkey-protocol-oauth-2.0/.../endpoint/IntrospectEndpoint.java@4.1.8",
+      "maxkey-protocols/maxkey-protocol-oauth-2.0/.../endpoint/UserInfoEndpoint.java@4.1.8",
+      "maxkey-protocols/maxkey-protocol-oauth-2.0/.../userinfo/endpoint/OAuthDefaultUserInfoAdapter.java@4.1.8",
+      "maxkey-protocols/maxkey-protocol-oauth-2.0/.../client/ClientCredentialsTokenGranter.java@4.1.8",
+      "maxkey-protocols/maxkey-protocol-oauth-2.0/.../oidc/idtoken/OIDCIdTokenEnhancer.java@4.1.8",
+      "maxkey-protocols/maxkey-protocol-oauth-2.0/.../autoconfigure/Oauth20AutoConfiguration.java@4.1.8",
+      "maxkey-protocols/maxkey-protocol-oauth-2.0/.../common/OAuth2Constants.java@4.1.8",
+      "maxkey-entity/.../apps/AppsOAuth20Details.java@4.1.8",
+      "maxkey-entity/.../idm/UserInfo.java@4.1.8",
+      "maxkey-web-frontend/maxkey-web-mgt-ng/.../app-oauth20-details-editer.component.html@main"
+    ]
+  },
+  "unverified": [
+    "受限 client 实际能否只用 authorization_code（需管理员在控制台按 authorized_grant_types 配置后实测）",
+    "per-client 自定义业务 scope（如 ledger.read）是否被 validateScope 接受（发现文档只列 5 个标准 scope）",
+    "accessTokenValiditySeconds 设为 900 后令牌真实 TTL（字段存在、DB 有列，需拿到令牌后实测）",
+    "PKCE 在换码环节是否强制校验（元数据声明 S256，TokenEndpoint 代码里未见 code_verifier 校验）",
+    "employeeNumber 在测试域是否已按 OA 员工编号全量填充（数据问题，需管理员核对两个测试账号）",
+    "client_credentials 令牌调 userinfo 的实际报错（无 client 未测；按代码推断无法给出员工属性）",
+    "refresh_token 有效期与是否可关（per-client refreshTokenValiditySeconds，需管理员确认口径）",
+    "发现文档 issuer 用 http + /maxkey 路径是否是反代配置问题（会影响任何做 iss 校验的客户端）"
+  ],
+  "decision": {
+    "feasible_contract_now": "员工授权 + 服务端 client：MCP/机器人在员工在场时（企微 H5 / 门户跳转）以 authorization_code 取得员工令牌，Bearer 传给 MCP；MCP 走 userinfo 取 employeeNumber 做权限隔离；accessTokenValiditySeconds=900，撤销靠短 TTL + 会话登出",
+    "needs_admin_new_capability": "若产品要求\\\"员工不在场时机器人代员工取数\\\"，MaxKey 4.1.8 无 token exchange / on-behalf 能力，必须由管理员侧新增能力（MaxKey 定制或网关签发），不能靠共享静态 Key、共享员工令牌或信任自报员工号替代",
+    "rejected_substitutes": [
+      "共享静态 API Key",
+      "共享员工账号/令牌",
+      "客户端或网关注入 X-Employee-No 由 MCP 信任",
+      "用 client_credentials 令牌冒充员工身份"
+    ]
+  }
+}

@@ -462,6 +462,111 @@ async function main() {
     check('6b', '适配层调用均携带服务 JWT + X-Employee-No + X-Request-Id',
       svcOk, `adapter调用=${adapterCalls.length}，样例=${JSON.stringify(adapterCalls[0] || {})}`);
 
+    // ===== 快照模式（LEDGER_DATA_MODE=snapshot）：真实 HTTP + mock IdP + 双员工 =====
+    // 快照来自 repair-ledger-data 的 data/current.json 结构；ACL 用显式夹具代行 OA 行级权限。
+    await kill(child);
+    const snapDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sgs-oa-mcp-snapshot-'));
+    const snapPath = path.join(snapDir, 'current.json');
+    const aclPath = path.join(snapDir, 'acl.json');
+    const snapRow = (id, projectid, projectnm, actsts = '1') => ({
+      ...ledgerBase, actbasid: id, projectid, projectnm, actsts,
+    });
+    const snapRows = [
+      snapRow('SA-001', 'SP-A01', '快照项目A1'),
+      snapRow('SA-002', 'SP-A02', '快照项目A2', '2'),
+      snapRow('SA-003', 'SP-A03', '快照项目A3'),
+      snapRow('SB-001', 'SP-B01', '快照项目B1'),
+      snapRow('SB-002', 'SP-B02', '快照项目B2'),
+      snapRow('SS-001', 'SP-S01', '快照共享项目'),
+    ];
+    fs.writeFileSync(snapPath, JSON.stringify({
+      schemaVersion: 1,
+      source: { environment: 'test', menu: ['统一数据管理', '投后数据统计', '在投业务台账', '在投业务台账列表'], endpoint: '/oamgr/SGMGR/sgproj/sgproj/list?type=1' },
+      fetchedAt: '2026-11-11T07:50:21.700Z',
+      integrity: { reportedTotal: snapRows.length, rowCount: snapRows.length, totalMatchesRowCount: true },
+      rows: snapRows,
+    }));
+    fs.writeFileSync(aclPath, JSON.stringify({
+      schemaVersion: 1,
+      // 夹具，仅代行 OA 行级权限；口径待 G-8 裁决，不是生产 ACL
+      employees: { 'E1001': ['SA-001', 'SA-002', 'SS-001'], 'E2002': ['SB-001', 'SB-002', 'SS-001'] },
+    }));
+
+    child = startMcpServer({
+      LEDGER_DATA_MODE: 'snapshot',
+      LEDGER_SNAPSHOT_PATH: snapPath,
+      LEDGER_SNAPSHOT_ACL_PATH: aclPath,
+    }, auditPath);
+    const up4 = await waitHttp(`${MCP_URL}/health`);
+    let healthSnap = null;
+    if (up4) healthSnap = await fetch(`${MCP_URL}/health`).then(r => r.json());
+    check('S1', '快照模式 /health 明示 snapshot 且 realtime=false、回快照版本/行数、不回显文件路径',
+      !!healthSnap && healthSnap.dataMode === 'snapshot' && healthSnap.realtime === false &&
+      healthSnap.snapshot?.available === true && healthSnap.snapshot?.rowCount === 6 &&
+      !!healthSnap.snapshot?.fetchedAt && !JSON.stringify(healthSnap).includes(snapDir),
+      `health=${JSON.stringify(healthSnap)}`);
+
+    const initSnapA = await mcpInitialize(tokenA);
+    const snapSearchA = await mcpCallTool(tokenA, initSnapA.sid, 'search_investment_ledger', { current: 1, size: 2, view: 'both' });
+    const snapPayloadA = toolPayload(snapSearchA);
+    check('S2', '快照模式按已验证身份返回 49 列 display、分页与 total 一致（员工A：3 行）',
+      snapSearchA.status === 200 && snapPayloadA.pagination.total === 3 &&
+      snapPayloadA.pagination.totalPages === 2 && snapPayloadA.rows.length === 2 &&
+      Object.keys(snapPayloadA.rows[0].display).length === 49 &&
+      snapPayloadA._meta.dataMode === 'snapshot' && snapPayloadA._meta.realtime === false,
+      `total=${snapPayloadA.pagination.total} rows=${snapPayloadA.rows.length} display49=${Object.keys(snapPayloadA.rows[0].display).length} meta=${JSON.stringify(snapPayloadA._meta)}`);
+
+    // 过滤器 + 分页在快照上仍生效，且不能越过 ACL
+    const snapFilter = await mcpCallTool(tokenA, initSnapA.sid, 'search_investment_ledger', { projectnm: '快照项目A2', view: 'raw' });
+    const snapFilterPayload = toolPayload(snapFilter);
+    const snapCrossFilter = await mcpCallTool(tokenA, initSnapA.sid, 'search_investment_ledger', { projectnm: '快照项目B1', view: 'raw' });
+    const snapCrossPayload = toolPayload(snapCrossFilter);
+    check('S3', '快照筛选取交集：A 能筛到本人项目，筛 B 的项目返回 0 行',
+      snapFilterPayload.pagination.total === 1 && snapFilterPayload.rows[0].actbasid === 'SA-002' &&
+      snapCrossPayload.pagination.total === 0,
+      `A筛A2=${snapFilterPayload.pagination.total} A筛B1=${snapCrossPayload.pagination.total}`);
+
+    const initSnapB = await mcpInitialize(tokenB);
+    const snapSearchB = await mcpCallTool(tokenB, initSnapB.sid, 'search_investment_ledger', { view: 'raw', size: 100 });
+    const snapPayloadB = toolPayload(snapSearchB);
+    const bIds = (snapPayloadB.rows || []).map(r => r.actbasid).sort();
+    check('S4', '快照模式双员工按同一 ACL 规则隔离：B 见 SB-*/SS-001，不见 SA-*',
+      snapPayloadB.pagination.total === 3 && JSON.stringify(bIds) === JSON.stringify(['SB-001', 'SB-002', 'SS-001']) &&
+      !snapSearchB.body.includes('SA-001'),
+      `A total=${snapPayloadA.pagination.total} / B total=${snapPayloadB.pagination.total} B ids=${bIds.join(',')}`);
+
+    // body 自报身份必须被忽略：A 的令牌 + body 声明 E2002
+    const spoof = await fetch(`${MCP_URL}/api/v1/tools/search_investment_ledger`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer ' + tokenA },
+      body: JSON.stringify({ view: 'raw', size: 100, employeeNo: 'E2002', employees: ['E2002'], acl: 'all' }),
+    });
+    const spoofBody = await spoof.json();
+    const spoofIds = (spoofBody.data?.rows || []).map(r => r.actbasid).sort();
+    check('S5', '普通员工 body 自报员工号被忽略：A 的令牌 + body employeeNo=E2002 仍只返回 A 的数据',
+      spoof.status === 200 && JSON.stringify(spoofIds) === JSON.stringify(['SA-001', 'SA-002', 'SS-001']),
+      `status=${spoof.status} ids=${spoofIds.join(',')}`);
+
+    // ACL 未覆盖的员工 → 403 PERMISSION_DENIED（不是空结果，也不是全部数据）
+    const strangerToken = mintToken({ employeeNo: 'E3003', sub: 'user-c-uuid' });
+    const stranger = await fetch(`${MCP_URL}/api/v1/tools/search_investment_ledger`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer ' + strangerToken },
+      body: JSON.stringify({ view: 'raw' }),
+    });
+    const strangerBody = await stranger.json();
+    check('S6', '快照 ACL 未覆盖的员工返回 403 PERMISSION_DENIED（fail-closed）',
+      stranger.status === 403 && strangerBody.code === 'PERMISSION_DENIED' && !JSON.stringify(strangerBody).includes('SA-001'),
+      `status=${stranger.status} code=${strangerBody.code}`);
+
+    const snapExport = await mcpCallTool(tokenA, initSnapA.sid, 'export_investment_ledger', { view: 'raw', maxRows: 10 });
+    const snapExportPayload = toolPayload(snapExport);
+    check('S7', '快照全量导出只含本人可见行且标注非实时',
+      snapExportPayload.export.complete === true && snapExportPayload.export.rowCount === 3 &&
+      snapExportPayload._meta.realtime === false &&
+      !snapExport.body.includes('SB-001'),
+      `complete=${snapExportPayload.export.complete} rowCount=${snapExportPayload.export.rowCount}`);
+
   } finally {
     await kill(child);
     idpServer.close();

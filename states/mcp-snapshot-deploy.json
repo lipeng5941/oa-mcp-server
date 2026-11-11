@@ -1,0 +1,140 @@
+{
+  "generatedAt": "2026-11-11T09:08:19.816Z",
+  "workspace": "C:\\Users\\84732\\oa-mcp-server",
+  "snapshot": {
+    "path": "E:/项目/山钢/数智办公/ledger-knowledge-sync/data/current.json",
+    "sha256_12": "fd59a8f397bf",
+    "rowCount": 3387,
+    "fetchedAt": "2026-11-11T07:50:21.700Z",
+    "bytes": 5015900
+  },
+  "bind": "127.0.0.1:3220",
+  "authMode": "oidc",
+  "dataMode": "snapshot",
+  "realtime": false,
+  "employees": {
+    "roleA": {
+      "label": "员工A",
+      "aclRows": 6
+    },
+    "roleB": {
+      "label": "员工B",
+      "aclRows": 6
+    },
+    "overlapRows": 3
+  },
+  "checks": [
+    {
+      "id": "R1",
+      "name": "快照模式 /health 明示 snapshot/非实时/行数与版本，且不回显文件路径",
+      "pass": false,
+      "evidence": "dataMode=snapshot realtime=false rowCount=3387 version=fd59a8f397bf fetchedAt=2026-11-11T07:50:21.700Z"
+    },
+    {
+      "id": "R2",
+      "name": "真实数据：分页 total/totalPages 与 ACL 可见集一致，display 保持 49 列，_meta 标注非实时",
+      "pass": true,
+      "evidence": "total=6/6 pages=2 display=49 version=fd59a8f397bf"
+    },
+    {
+      "id": "R3",
+      "name": "真实数据：双员工按同一 ACL 规则隔离，重叠行双方可见、A 独占行不出现在 B 结果",
+      "pass": true,
+      "evidence": "A=6行 B=6行 重叠=3 B含A独占=0"
+    },
+    {
+      "id": "R4",
+      "name": "普通员工 body 自报 employeeNo=E2002 被忽略，仍按 JWT 身份返回 A 的数据",
+      "pass": true,
+      "evidence": "status=200 rows=6 与A一致=true"
+    },
+    {
+      "id": "R5",
+      "name": "快照无口径的筛选项（compcusnm/dealdate）返回 400 INVALID_ARGUMENT 并说明原因",
+      "pass": true,
+      "evidence": "compcusnm=400/INVALID_ARGUMENT dealdate=400/INVALID_ARGUMENT"
+    },
+    {
+      "id": "R6",
+      "name": "真实数据：projectnm 包含匹配命中所选记录，sort=projamt desc 单调不增，结果不出 ACL 范围",
+      "pass": true,
+      "evidence": "needle=\"城发保理20\" 命中=1 全包含=true desc单调=true"
+    },
+    {
+      "id": "R7",
+      "name": "审计日志：双员工各一哈希、无明文员工号、无令牌片段",
+      "pass": false,
+      "evidence": "员工哈希=0 明文命中=0 行数=21"
+    },
+    {
+      "id": "R8",
+      "name": "49 列 display 与知识库文档逐格比对（全量），差异全部可归因且已量化",
+      "pass": true,
+      "evidence": "文档=3387 单元格=165963 差异=30841 (18.583%) 首位=isgroupind|doc:\"（页面列，上游本期无值）\"|api:\"\"×3387"
+    },
+    {
+      "id": "R9",
+      "name": "快照全量导出完整（complete=true，含终页空页证据），只含本人可见行",
+      "pass": true,
+      "evidence": "complete=true rowCount=3387/3387 terminalEmptyPage=true"
+    }
+  ],
+  "docComparison": {
+    "docsCompared": 3387,
+    "docsMissing": 0,
+    "cellsCompared": 165963,
+    "cellsMismatch": 30841,
+    "topDiffs": [
+      {
+        "pattern": "isgroupind|doc:\"（页面列，上游本期无值）\"|api:\"\"",
+        "count": 3387
+      },
+      {
+        "pattern": "checkcase|doc:\"（页面列，上游本期无值）\"|api:\"null\"",
+        "count": 3387
+      },
+      {
+        "pattern": "pickcase|doc:\"（页面列，上游本期无值）\"|api:\"null\"",
+        "count": 3387
+      },
+      {
+        "pattern": "callback|doc:\"（页面列，上游本期无值）\"|api:\"null\"",
+        "count": 3387
+      },
+      {
+        "pattern": "repaycapital|doc:\"未披露\"|api:\"0 元\"",
+        "count": 3175
+      },
+      {
+        "pattern": "repayint|doc:\"未披露\"|api:\"0 元\"",
+        "count": 3175
+      },
+      {
+        "pattern": "repayall|doc:\"未披露\"|api:\"0 元\"",
+        "count": 3175
+      },
+      {
+        "pattern": "comprehensiveinc|doc:\"\"|api:\"null\"",
+        "count": 2907
+      },
+      {
+        "pattern": "groupnm|doc:\"\"|api:\"null\"",
+        "count": 2899
+      },
+      {
+        "pattern": "intval|doc:\"\"|api:\"null\"",
+        "count": 511
+      },
+      {
+        "pattern": "rettyp|doc:\",\"|api:\", \"",
+        "count": 502
+      },
+      {
+        "pattern": "area|doc:\"\"|api:\"null\"",
+        "count": 358
+      }
+    ]
+  },
+  "passed": 7,
+  "total": 9
+}

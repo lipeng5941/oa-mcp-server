@@ -1,3 +1,5 @@
+import * as fs from 'fs';
+import { createHash } from 'crypto';
 import { ServerConfig } from '../config';
 import { VerifiedIdentity } from '../auth/verify';
 import { callAdapter } from './adapter';
@@ -19,6 +21,18 @@ import {
 } from './ledgerSchema';
 
 export class LedgerDataError extends Error {}
+
+// 权限拒绝（快照 ACL 未覆盖当前员工 / 快照 ACL 不可用）：与参数错误区分，REST 映射 403。
+export class LedgerPermissionError extends Error {}
+
+export interface LedgerResponseMeta {
+  dataMode: 'adapter' | 'snapshot';
+  realtime: boolean;
+  acl: 'oa-adapter-row-permission' | 'snapshot-acl-fixture';
+  snapshotVersion?: string;
+  snapshotFetchedAt?: string;
+  snapshotRowCount?: number;
+}
 
 interface RawLedgerPage {
   rows: LedgerRawRow[];
@@ -101,6 +115,240 @@ function parseAdapterPage(payload: unknown, current: number, size: number): RawL
   return { rows, reportedTotal, current, size };
 }
 
+// ============ 快照数据源（LEDGER_DATA_MODE=snapshot，非实时） ============
+// 快照来自 repair-ledger-data 生成的 data/current.json（同一份数据渲染 3387 篇文档）。
+// 设计要求：
+//   1. 只读；不改数据、不写回、不联网。
+//   2. 员工身份只来自已验证令牌（identity.employeeNo），绝不读 body/未签名头。
+//   3. ACL 用「显式夹具」代行 OA 行级权限：文件由 LEDGER_SNAPSHOT_ACL_PATH 指定，
+//      未覆盖当前员工 → 抛 LedgerPermissionError（fail-closed，绝不退化成全员可见）。
+//      字段口径（机构/经办人/项目组）属 G-8 业务裁决，本模块不自行选口径。
+//   4. 返回体带 _meta.dataMode=snapshot / realtime=false，任何调用方都不得把快照当实时 OA。
+
+interface LoadedSnapshot {
+  rows: LedgerRawRow[];
+  fetchedAt: string;
+  schemaVersion: number;
+  version: string;      // 快照内容 sha256 前 12 位，供第三方判断「数据是哪一版」
+  rowCount: number;
+}
+
+const snapshotCache = new Map<string, { mtimeMs: number; size: number; snapshot: LoadedSnapshot }>();
+
+export function loadLedgerSnapshot(filePath: string): LoadedSnapshot {
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(filePath);
+  } catch {
+    throw new LedgerDataError('快照文件不可读（LEDGER_SNAPSHOT_PATH）');
+  }
+  const cached = snapshotCache.get(filePath);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.snapshot;
+
+  const raw = fs.readFileSync(filePath);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw.toString('utf8'));
+  } catch {
+    throw new LedgerDataError('快照文件不是合法 JSON');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new LedgerDataError('快照文件根节点不是对象');
+  }
+  const doc = parsed as Record<string, unknown>;
+  if (doc.schemaVersion !== 1) {
+    throw new LedgerDataError(`快照 schemaVersion 不受支持: ${String(doc.schemaVersion)}`);
+  }
+  if (!Array.isArray(doc.rows)) {
+    throw new LedgerDataError('快照缺少 rows 数组');
+  }
+  const rows = doc.rows.map((row, index) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) {
+      throw new LedgerDataError(`快照第 ${index + 1} 行不是对象`);
+    }
+    return row as LedgerRawRow;
+  });
+  const snapshot: LoadedSnapshot = {
+    rows,
+    fetchedAt: typeof doc.fetchedAt === 'string' ? doc.fetchedAt : '',
+    schemaVersion: 1,
+    version: createHash('sha256').update(raw).digest('hex').slice(0, 12),
+    rowCount: rows.length,
+  };
+  snapshotCache.set(filePath, { mtimeMs: stat.mtimeMs, size: stat.size, snapshot });
+  return snapshot;
+}
+
+interface LoadedSnapshotAcl {
+  employees: Map<string, Set<string>>;
+  version: string;
+}
+
+const snapshotAclCache = new Map<string, { mtimeMs: number; size: number; acl: LoadedSnapshotAcl }>();
+
+// ACL 夹具格式：{ "schemaVersion": 1, "employees": { "<员工编号>": ["<actbasid>", ...] } }
+// 空数组 = 该员工在权限范围内无数据；未出现的员工 = 拒绝（不是「无数据」）。
+export function loadLedgerSnapshotAcl(filePath: string): LoadedSnapshotAcl {
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(filePath);
+  } catch {
+    throw new LedgerPermissionError('快照 ACL 夹具不可读，拒绝返回数据');
+  }
+  const cached = snapshotAclCache.get(filePath);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.acl;
+
+  const raw = fs.readFileSync(filePath);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw.toString('utf8'));
+  } catch {
+    throw new LedgerPermissionError('快照 ACL 夹具不是合法 JSON，拒绝返回数据');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new LedgerPermissionError('快照 ACL 夹具根节点不是对象，拒绝返回数据');
+  }
+  const doc = parsed as Record<string, unknown>;
+  if (doc.schemaVersion !== 1) {
+    throw new LedgerPermissionError(`快照 ACL schemaVersion 不受支持: ${String(doc.schemaVersion)}`);
+  }
+  const employeesRaw = doc.employees;
+  if (!employeesRaw || typeof employeesRaw !== 'object' || Array.isArray(employeesRaw)) {
+    throw new LedgerPermissionError('快照 ACL 缺少 employees 映射，拒绝返回数据');
+  }
+  const employees = new Map<string, Set<string>>();
+  for (const [employeeNo, value] of Object.entries(employeesRaw as Record<string, unknown>)) {
+    if (!Array.isArray(value) || value.some(id => typeof id !== 'string' || !id.trim())) {
+      throw new LedgerPermissionError(`快照 ACL 中员工 ${employeeNo} 的 actbasid 列表非法`);
+    }
+    employees.set(employeeNo, new Set((value as string[]).map(id => id.trim())));
+  }
+  const acl: LoadedSnapshotAcl = {
+    employees,
+    version: createHash('sha256').update(raw).digest('hex').slice(0, 12),
+  };
+  snapshotAclCache.set(filePath, { mtimeMs: stat.mtimeMs, size: stat.size, acl });
+  return acl;
+}
+
+// 只认已验证身份；ACL 未覆盖该员工 → 403 语义，不回退到「全部可见」。
+function allowedLedgerIds(cfg: ServerConfig, identity: VerifiedIdentity): Set<string> {
+  const acl = loadLedgerSnapshotAcl(cfg.ledgerSnapshotAclPath);
+  const allowed = acl.employees.get(identity.employeeNo);
+  if (!allowed) {
+    throw new LedgerPermissionError('当前员工不在快照 ACL 覆盖范围内，拒绝返回数据');
+  }
+  return allowed;
+}
+
+// 快照没有的字段：口径由 OA 适配层 SQL 决定，猜一个等于编数据 → 显式拒绝。
+const SNAPSHOT_UNSUPPORTED_FILTERS: Record<string, string> = {
+  compcusnm: '快照无「所属集团/核心企业/付款人」字段，该口径由 OA 适配层实现；请用 adapter 模式或在 G-8 裁决后扩展',
+  dealdate: '「截至该日期未结清」的判定由 OA 适配层实现，快照无法等价复算；请用 adapter 模式',
+};
+
+// 名称类字段按包含匹配（与工具描述「项目名称，模糊查询」一致）；编号类按精确匹配。
+const SNAPSHOT_FUZZY_FILTERS = ['projectnm', 'cusnm', 'site'] as const;
+const SNAPSHOT_EXACT_FILTERS = ['projectno', 'ctrtcode'] as const;
+
+function matchesSnapshotFilters(row: LedgerRawRow, params: Required<Pick<LedgerSearchParams, 'current' | 'size' | 'view'>> & LedgerSearchParams): boolean {
+  for (const name of SNAPSHOT_FUZZY_FILTERS) {
+    const needle = params[name];
+    if (typeof needle === 'string' && needle.trim()) {
+      const hay = row[name] === undefined || row[name] === null ? '' : String(row[name]);
+      if (!hay.toLowerCase().includes(needle.trim().toLowerCase())) return false;
+    }
+  }
+  for (const name of SNAPSHOT_EXACT_FILTERS) {
+    const needle = params[name];
+    if (typeof needle === 'string' && needle.trim()) {
+      const hay = row[name] === undefined || row[name] === null ? '' : String(row[name]);
+      if (hay.trim().toLowerCase() !== needle.trim().toLowerCase()) return false;
+    }
+  }
+  if (params.actsts && String(row.actsts ?? '') !== params.actsts) return false;
+  return true;
+}
+
+function compareSnapshotValues(a: unknown, b: unknown): number {
+  const sa = a === undefined || a === null ? '' : String(a);
+  const sb = b === undefined || b === null ? '' : String(b);
+  if (sa !== '' && sb !== '' && Number.isFinite(Number(sa)) && Number.isFinite(Number(sb))) {
+    return Number(sa) - Number(sb);
+  }
+  return sa < sb ? -1 : sa > sb ? 1 : 0;
+}
+
+function snapshotPage(
+  cfg: ServerConfig,
+  identity: VerifiedIdentity,
+  params: Required<Pick<LedgerSearchParams, 'current' | 'size' | 'view'>> & LedgerSearchParams,
+): RawLedgerPage {
+  for (const [name, reason] of Object.entries(SNAPSHOT_UNSUPPORTED_FILTERS)) {
+    const value = (params as unknown as Record<string, unknown>)[name];
+    if (typeof value === 'string' && value.trim()) {
+      throw new LedgerDataError(`snapshot 模式不支持 ${name} 筛选：${reason}`);
+    }
+  }
+
+  const snapshot = loadLedgerSnapshot(cfg.ledgerSnapshotPath);
+  const allowed = allowedLedgerIds(cfg, identity);
+
+  // 先按 ACL 裁剪，再筛选：筛选条件永远不能扩大可见范围。
+  let rows = snapshot.rows.filter(row => {
+    const id = rowId(row);
+    return id !== null && allowed.has(id);
+  });
+  rows = rows.filter(row => matchesSnapshotFilters(row, params));
+
+  if (params.sort) {
+    const field = params.sort as keyof LedgerRawRow;
+    const direction = params.order === 'desc' ? -1 : 1;
+    rows = [...rows].sort((a, b) => direction * compareSnapshotValues(a[field], b[field]));
+  }
+
+  const start = (params.current - 1) * params.size;
+  return {
+    rows: rows.slice(start, start + params.size),
+    reportedTotal: rows.length,
+    current: params.current,
+    size: params.size,
+  };
+}
+
+function responseMeta(cfg: ServerConfig): LedgerResponseMeta {
+  if (cfg.ledgerDataMode === 'snapshot') {
+    const snapshot = loadLedgerSnapshot(cfg.ledgerSnapshotPath);
+    return {
+      dataMode: 'snapshot',
+      realtime: false,
+      acl: 'snapshot-acl-fixture',
+      snapshotVersion: snapshot.version,
+      snapshotFetchedAt: snapshot.fetchedAt,
+      snapshotRowCount: snapshot.rowCount,
+    };
+  }
+  return { dataMode: 'adapter', realtime: true, acl: 'oa-adapter-row-permission' };
+}
+
+// /health 用：只回快照的版本与行数，不回显文件路径。
+export function getLedgerSnapshotSummary(cfg: ServerConfig): {
+  available: boolean; fetchedAt?: string; rowCount?: number; version?: string; schemaVersion?: number;
+} {
+  try {
+    const snapshot = loadLedgerSnapshot(cfg.ledgerSnapshotPath);
+    return {
+      available: true,
+      fetchedAt: snapshot.fetchedAt,
+      rowCount: snapshot.rowCount,
+      version: snapshot.version,
+      schemaVersion: snapshot.schemaVersion,
+    };
+  } catch {
+    return { available: false };
+  }
+}
+
 async function fetchLedgerPage(
   cfg: ServerConfig,
   identity: VerifiedIdentity,
@@ -109,6 +357,10 @@ async function fetchLedgerPage(
   maxSize = 100,
 ): Promise<RawLedgerPage> {
   const normalized = normalizeSearchParams(params, maxSize);
+  if (cfg.ledgerDataMode === 'snapshot') {
+    // 快照模式：不发起任何网络请求，不触碰适配层地址/服务 JWT。
+    return snapshotPage(cfg, identity, normalized);
+  }
   const body: Record<string, unknown> = {
     current: normalized.current,
     size: normalized.size,
@@ -136,11 +388,12 @@ export async function searchInvestmentLedger(
   identity: VerifiedIdentity,
   params: LedgerSearchParams,
   reqId: string,
-): Promise<LedgerPageResult> {
+): Promise<LedgerPageResult & { _meta: LedgerResponseMeta }> {
   const normalized = normalizeSearchParams(params);
   const page = await fetchLedgerPage(cfg, identity, normalized, reqId);
   const totalPages = Math.ceil(page.reportedTotal / page.size);
   return {
+    _meta: responseMeta(cfg),
     source: LEDGER_SOURCE,
     view: normalized.view,
     columns: LEDGER_COLUMNS,
@@ -165,7 +418,7 @@ export async function exportInvestmentLedger(
   identity: VerifiedIdentity,
   params: LedgerExportParams,
   reqId: string,
-): Promise<LedgerExportResult> {
+): Promise<LedgerExportResult & { _meta: LedgerResponseMeta }> {
   const view = params.view || 'both';
   if (!['raw', 'display', 'both'].includes(view)) {
     throw new LedgerDataError('view 仅支持 raw、display、both');
@@ -253,6 +506,7 @@ export async function exportInvestmentLedger(
   }
 
   return {
+    _meta: responseMeta(cfg),
     source: LEDGER_SOURCE,
     view,
     columns: LEDGER_COLUMNS,
@@ -275,9 +529,12 @@ export async function exportInvestmentLedger(
   };
 }
 
-export function getInvestmentLedgerSchema() {
+export function getInvestmentLedgerSchema(cfg?: ServerConfig) {
+  const dataMode = cfg?.ledgerDataMode ?? 'adapter';
   return {
     source: LEDGER_SOURCE,
+    dataMode,
+    realtime: dataMode === 'adapter',
     columns: LEDGER_COLUMNS,
     filters: LEDGER_FILTERS,
     sortFields: LEDGER_SORT_FIELDS,
