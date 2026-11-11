@@ -164,6 +164,7 @@ function startMcpServer(envExtra, auditPath) {
     stdio: ['ignore', 'pipe', 'pipe'],
     cwd: REPO,
   });
+  child.stdout.on('data', d => process.stdout.write(`[mcp:out] ${d}`));
   child.stderr.on('data', d => process.stderr.write(`[mcp:err] ${d}`));
   return child;
 }
@@ -173,7 +174,9 @@ async function waitHttp(url, tries = 50) {
     try {
       const r = await fetch(url);
       if (r.status < 500) return true;
-    } catch {}
+    } catch (error) {
+      if (i === tries - 1) console.error(`waitHttp last error for ${url}:`, error);
+    }
     await new Promise(r => setTimeout(r, 100));
   }
   return false;
