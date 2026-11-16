@@ -14,9 +14,11 @@ import {
 import {
   LEDGER_CODE_SETS,
   LEDGER_COLUMNS,
+  LEDGER_CONTRACT_VERSION,
   LEDGER_FILTERS,
   LEDGER_SORT_FIELDS,
   LEDGER_SOURCE,
+  ledgerDictionaryVersion,
   toLedgerDisplayRow,
 } from './ledgerSchema';
 
@@ -29,7 +31,13 @@ export interface LedgerResponseMeta {
   dataMode: 'adapter' | 'snapshot';
   realtime: boolean;
   acl: 'oa-adapter-row-permission' | 'snapshot-acl-fixture';
-  snapshotVersion?: string;
+  // 数据版本三件套：第三方据此判断"这批数据是哪一版"，三者都必须非空。
+  // snapshotVersion：snapshot=快照文件 sha256 前 12 位；adapter=固定字面量 live-adapter（无快照，不伪造版本号）。
+  snapshotVersion: string;
+  // dictionaryVersion：49 列字典定义的哈希（cols49-xxxxxxxxxxxx），列口径一改就变。
+  dictionaryVersion: string;
+  // contractVersion：响应结构版本，见 docs/第三方接入说明_V1.1.md。
+  contractVersion: string;
   snapshotFetchedAt?: string;
   snapshotRowCount?: number;
 }
@@ -317,6 +325,10 @@ function snapshotPage(
 }
 
 function responseMeta(cfg: ServerConfig): LedgerResponseMeta {
+  const versions = {
+    dictionaryVersion: ledgerDictionaryVersion(),
+    contractVersion: LEDGER_CONTRACT_VERSION,
+  };
   if (cfg.ledgerDataMode === 'snapshot') {
     const snapshot = loadLedgerSnapshot(cfg.ledgerSnapshotPath);
     return {
@@ -324,11 +336,20 @@ function responseMeta(cfg: ServerConfig): LedgerResponseMeta {
       realtime: false,
       acl: 'snapshot-acl-fixture',
       snapshotVersion: snapshot.version,
+      ...versions,
       snapshotFetchedAt: snapshot.fetchedAt,
       snapshotRowCount: snapshot.rowCount,
     };
   }
-  return { dataMode: 'adapter', realtime: true, acl: 'oa-adapter-row-permission' };
+  // adapter 实时读 OA：没有快照文件，snapshotVersion 用固定字面量 live-adapter，
+  // 让调用方能稳定判断"这批数据不是快照"，而不是回一个空值或伪哈希。
+  return {
+    dataMode: 'adapter',
+    realtime: true,
+    acl: 'oa-adapter-row-permission',
+    snapshotVersion: 'live-adapter',
+    ...versions,
+  };
 }
 
 // /health 用：只回快照的版本与行数，不回显文件路径。

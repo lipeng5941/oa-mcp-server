@@ -104,7 +104,21 @@ export const LEDGER_COLUMNS: LedgerColumn[] = [
   col('crtuser', '经办人'),
 ];
 
+// 台账工具契约版本：响应形状或字段语义变化时升位（只改取值口径不升）。第三方据此判断"返回结构是哪一版"。
+export const LEDGER_CONTRACT_VERSION = '1.0.0';
+
+// 字典版本：由 49 列的 field|title|kind|sourceField|codeSet 规范化序列哈希得到。
+// 列定义一改版本必变（列数前缀 + sha256 前 12 位），因此它就是"数据是哪一版字典"的可复核证据，
+// 而不是时间戳或手填字符串。与快照版本相互独立：同一份列口径服务任意快照。
+export function ledgerDictionaryVersion(): string {
+  const canonical = LEDGER_COLUMNS
+    .map(column => [column.field, column.title, column.kind, column.sourceField ?? '', column.codeSet ?? ''].join('|'))
+    .join('\n');
+  return `cols${LEDGER_COLUMNS.length}-${createHash('sha256').update(canonical).digest('hex').slice(0, 12)}`;
+}
+
 export const LEDGER_FILTERS = [
+  { name: 'projectnm', label: '项目名称', type: 'string' },
   { name: 'projectno', label: '项目编号', type: 'string' },
   { name: 'cusnm', label: '客户名称', type: 'string' },
   { name: 'ctrtcode', label: '合同编号', type: 'string' },
