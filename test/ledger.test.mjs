@@ -6,9 +6,12 @@ import { fileURLToPath } from 'node:url';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
 import { loadConfig } from '../dist/config.js';
 import { searchInvestmentLedger, exportInvestmentLedger, getInvestmentLedgerSchema } from '../dist/api/ledger.js';
 import { toLedgerDisplayRow, LEDGER_COLUMNS } from '../dist/api/ledgerSchema.js';
+// 版本常量/字典版本函数在修复前不存在：用命名空间导入，让缺口落在断言层而不是整文件链接失败。
+import * as ledgerSchemaModule from '../dist/api/ledgerSchema.js';
 
 const identity = { employeeNo: 'E1001', subject: 'unit-a', clientId: 'unit-test', raw: {} };
 
@@ -467,4 +470,59 @@ test('snapshot export returns only ACL-visible rows and marks the payload as non
   assert.equal(result._meta.dataMode, 'snapshot');
   assert.equal(result._meta.realtime, false);
 });
+
+// ---------- L1-3 _meta 契约：三个版本字段必须非空且可回溯 ----------
+
+test('_meta carries snapshotVersion/dictionaryVersion/contractVersion so callers can pin the data version', async () => {
+  const fixture = snapshotFixture(snapRows, { E1001: snapRows.map(r => r.actbasid) });
+  const cfg = snapshotConfig(fixture);
+  const page = await searchInvestmentLedger(cfg, identity, { size: 2 }, 'req-meta-snap');
+
+  for (const field of ['snapshotVersion', 'dictionaryVersion', 'contractVersion']) {
+    const value = page._meta[field];
+    assert.equal(typeof value, 'string', `_meta.${field} 不是字符串`);
+    assert.ok(String(value).trim().length > 0, `_meta.${field} 为空`);
+  }
+  // snapshotVersion 必须等于快照文件内容的 sha256 前 12 位（可独立复核，不是时间戳）
+  const expected = createHash('sha256').update(fs.readFileSync(fixture.snapPath)).digest('hex').slice(0, 12);
+  assert.equal(page._meta.snapshotVersion, expected);
+  assert.equal(page._meta.contractVersion, ledgerSchemaModule.LEDGER_CONTRACT_VERSION);
+  assert.equal(page._meta.dictionaryVersion, ledgerSchemaModule.ledgerDictionaryVersion());
+
+  // export 走同一份 meta
+  const exported = await exportInvestmentLedger(cfg, identity, { view: 'raw' }, 'req-meta-export');
+  assert.equal(exported._meta.contractVersion, page._meta.contractVersion);
+  assert.equal(exported._meta.dictionaryVersion, page._meta.dictionaryVersion);
+  assert.equal(exported._meta.snapshotVersion, page._meta.snapshotVersion);
+});
+
+test('adapter mode still exposes all three version fields and never pretends to be a snapshot', async () => {
+  await withAdapter(() => ({ body: { total: 1, rows: [baseRow] } }), async ({ port }) => {
+    const result = await searchInvestmentLedger(config(port), identity, { size: 1 }, 'req-meta-adapter');
+    assert.equal(result._meta.dataMode, 'adapter');
+    assert.equal(result._meta.realtime, true);
+    for (const field of ['snapshotVersion', 'dictionaryVersion', 'contractVersion']) {
+      assert.ok(String(result._meta[field] ?? '').trim().length > 0, `adapter 模式 _meta.${field} 为空`);
+    }
+    // 实时模式没有快照文件：不得把 'live' 之外的伪版本号写进契约
+    assert.equal(result._meta.snapshotVersion, 'live-adapter');
+  });
+});
+
+test('dictionaryVersion is derived from the 49-column dictionary and moves when a column definition changes', () => {
+  const version = ledgerSchemaModule.ledgerDictionaryVersion();
+  assert.match(version, /^cols49-[0-9a-f]{12}$/);
+  assert.equal(version, ledgerSchemaModule.ledgerDictionaryVersion(), '同一份列定义必须得到同一版本');
+  // 口径变化（新增/改名一列）必须换版本，靠时间戳或手填版本号做不到这一点
+  LEDGER_COLUMNS.push({ field: 'unit_test_extra', title: '测试列', kind: 'text' });
+  try {
+    const drifted = ledgerSchemaModule.ledgerDictionaryVersion();
+    assert.match(drifted, /^cols50-[0-9a-f]{12}$/);
+    assert.notEqual(drifted, version);
+  } finally {
+    LEDGER_COLUMNS.pop();
+  }
+  assert.equal(ledgerSchemaModule.ledgerDictionaryVersion(), version, '列定义还原后版本必须回到原值');
+});
+
 

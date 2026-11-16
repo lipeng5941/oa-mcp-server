@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { LedgerColumn, LedgerRawRow } from '../types/ledger';
 
 export const LEDGER_SOURCE = {
@@ -70,6 +71,8 @@ export const LEDGER_COLUMNS: LedgerColumn[] = [
   col('projtype', '业务类型', 'businessType'),
   col('begdate', '项目投放日期'),
   col('enddate', '项目应到期日'),
+  // actsts 取值 1=正常、2=逾期、3=已结清（SG002）。契约提醒：上游在 actsts=2 时返回 HTTP 500，
+  // 因此 2 只能作为"有值即返回"的字典项出现，不能当作可用筛选条件对外承诺（详见 docs/第三方接入说明_V1.1.md）。
   col('actsts', '项目状态', 'dictionary', { codeSet: 'SG002' }),
   col('biztype', '内/外部', 'dictionary', { codeSet: 'FLP09' }),
   col('yield', '项目收益率（IRR）', 'percent'),
@@ -102,7 +105,6 @@ export const LEDGER_COLUMNS: LedgerColumn[] = [
 ];
 
 export const LEDGER_FILTERS = [
-  { name: 'projectnm', label: '项目名称', type: 'string' },
   { name: 'projectno', label: '项目编号', type: 'string' },
   { name: 'cusnm', label: '客户名称', type: 'string' },
   { name: 'ctrtcode', label: '合同编号', type: 'string' },
